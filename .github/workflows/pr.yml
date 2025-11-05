@@ -1,0 +1,53 @@
+name: Lint & Test
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  format-lint:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5 
+        with:
+          python-version: '3.10' 
+
+      - name: Install Jaguar Re-Identification
+        run: pip3 install -e . --extra-index-url https://download.pytorch.org/whl/cpu
+        shell: bash
+
+      - name: Lint
+        run: |
+          make lint
+        shell: bash
+
+  test:
+    runs-on: ubuntu-latest
+    needs: format-lint 
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5 
+        with:
+          python-version: '3.10'
+
+      - name: Install Jaguar Re-Identification
+        run: pip3 install -e . --extra-index-url https://download.pytorch.org/whl/cpu
+        shell: bash
+
+      - name: Run Mypy
+        run: make mypy ARGS="--install-types --non-interactive"
+        shell: bash
+
+      - name: Run tests
+        run: |
+          make test
+        shell: bash
