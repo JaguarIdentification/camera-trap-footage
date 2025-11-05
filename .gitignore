@@ -1,3 +1,12 @@
+# Kaggle credentials
+kaggle.json
+
+# Local dvc cache
+.dvc/cache/
+
+# IDE
+.vscode/
+.idea/
 data/*
 video_data/*
 !data/mock/

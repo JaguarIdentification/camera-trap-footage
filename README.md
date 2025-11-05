@@ -23,6 +23,53 @@ In the unlikely case that someone changed the environment.yml file, you can upda
 conda env update --file environment.yml --prune
 ```
 
+## Makefile handy targets
+
+Setup:
+- `make env` — create the conda environment from `environment.yml`.
+- `make update` — updates the conda environment from `environment.yml`.
+- `make install` — pip install the package in editable mode inside the active environment.
+- `make data` — pulls data tracked by DVC (requires DVC initialized / configured remote).
+
+Analysis & Tests:
+- `make format`
+- `make lint`
+- `make mypy`
+- `make all` (runs all of the above)
+- `make test`
+
+## Data management with DVC
+
+We use DVC to keep large datasets out of Git while tracking them reproducibly.
+
+- Initialize DVC locally (run once):
+
+```bash
+dvc init
+git add .dvc .dvcignore
+git commit -m "chore: init dvc"
+```
+
+- Add a (large) dataset and push to remote (example):
+
+```bash
+# add local data file or folder
+dvc add data/large-dataset
+git add data/large-dataset.dvc .gitignore
+git commit -m "chore: track dataset with dvc"
+# configure a remote (S3, GCS, Azure, SSH, etc.) and push
+dvc remote add -d myremote s3://my-bucket/path
+dvc push
+```
+
+- To get data on another machine, run:
+
+```bash
+dvc pull
+```
+
+The Makefile includes a `data` target that runs `dvc pull` for convenience.
+
 ## Authors
 - Mehdi Gouasmi (https://github.com/D-i-n-o)
 - Philipp Kolbe (https://github.com/philippkolbe)
