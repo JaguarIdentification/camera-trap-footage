@@ -1,0 +1,105 @@
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "jaguar-reidentification"
+version = "0.1.0"
+description = "Project to reidentify jaguar individuals as part of seminar at HPI."
+readme = "README.md"
+license = {text = "MIT"}
+authors = [
+    {name = "Philipp Kolbe", email = "philipp.kolbe@student.hpi.de"},
+    {name = "Mehdi Gouasmi", email = "mehdi.gouasmi@student.hpi.de"}
+]
+keywords = ["python", "embeddings", "neural networks", "machine learning", "reidentification", "jaguar"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Development Status :: 4 - Beta"
+]
+
+requires-python = ">=3.10"
+dependencies = [
+  "lightning",
+  "torch",
+  "torchvision",
+  "torchaudio",
+]
+
+[tool.setuptools.package-data]
+jaguar-reidentification = ["py.typed"]
+
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.mypy]
+files = "src"
+strict = true
+python_version = "3.10"
+
+follow_imports = "silent"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+show_error_codes = true
+strict_optional = true
+warn_redundant_casts = true
+disallow_any_generics = true
+check_untyped_defs = true
+no_implicit_reexport = true
+disallow_subclassing_any = true
+disallow_incomplete_defs = true
+disallow_untyped_decorators = true
+disallow_untyped_calls = true
+# many libraries (torch, torchvision, timm, print_on_stroids) do not support a
+# py.typed marker and thus don't have library stubs. Thus we ignore these warns. 
+ignore_missing_imports = true
+
+
+[tool.pytest.ini_options]
+minversion = "7.0"
+addopts = "--strict-markers"
+testpaths = ["tests"]
+
+[tool.black]
+line-length = 120
+target-version = ["py38", "py39", "py310"]
+
+[tool.isort]
+profile = "black"
+known_third_party = ["numpy"]
+line_length = 120
+
+[tool.ruff]
+line-length = 120
+exclude = ["examples/interface.ipynb"]
+
+[tool.ruff.lint]
+select = [
+    # pydocstyle
+    "D",
+    # # pycodestyle
+    "E",
+    # # Pyflakes
+    "F",
+    # # pyupgrade
+    "UP",
+    # # flake8-bugbear
+    "B",
+    # # flake8-simplify
+    "SIM",
+    # # isort
+    # "I",
+]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["D"]
+"examples/**" = ["D"] 
+"src/**" = ["D104"] # Missing docstring in public module / package

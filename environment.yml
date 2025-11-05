@@ -1,0 +1,32 @@
+name: jid
+channels:
+  - conda-forge
+  - pytorch
+  - nvidia
+dependencies:
+  - python=3.10
+  - pytorch
+  - torchvision
+  - wandb
+  - pip
+  - ffmpeg
+
+  # Good to have
+  - numpy
+  - scipy
+  - pandas
+  - scikit-learn
+  - matplotlib
+  - seaborn
+
+  # Dev dependencies
+  - black
+  - ruff
+  - isort
+  - mypy
+  - pytest
+
+  # - cudatoolkit=11.8  # optional — remove if you don't have GPU or CUDA installed
+  - pip:
+    - fiftyone
+    - wandb[sweeps]
