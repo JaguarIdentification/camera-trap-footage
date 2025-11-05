@@ -30,3 +30,5 @@ dependencies:
   - pip:
     - fiftyone
     - wandb[sweeps]
+    - kaggle        # Kaggle API for programmatic downloads (upload kaggle.json in sessions)
+    - dvc           # Data Version Control

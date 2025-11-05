@@ -42,25 +42,35 @@ Analysis & Tests:
 
 We use DVC to keep large datasets out of Git while tracking them reproducibly.
 
-- Initialize DVC locally (run once):
+- Initialize DVC locally (run once already):
 
 ```bash
 dvc init
+
+# TODO configure a remote (S3, GCS, Azure, SSH, etc.) - only once
+dvc remote add -d myremote s3://my-bucket/path
+
 git add .dvc .dvcignore
 git commit -m "chore: init dvc"
 ```
 
-- Add a (large) dataset and push to remote (example):
+- TODO Authenticate (everyone once)
 
+- Add a (large) dataset and push to remote (example):
 ```bash
-# add local data file or folder
+##  DVC START           ##
 dvc add data/large-dataset
+###      GIT START     ###
 git add data/large-dataset.dvc .gitignore
 git commit -m "chore: track dataset with dvc"
-# configure a remote (S3, GCS, Azure, SSH, etc.) and push
-dvc remote add -d myremote s3://my-bucket/path
+git push
+###       GIT END      ###
 dvc push
+##  DVC END             ##
 ```
+
+**Note: How dvc commands always wrap around the git commands!**
+**It is essential that these are applied in the correct order to avoid issues with dvc!**
 
 - To get data on another machine, run:
 
