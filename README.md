@@ -85,8 +85,11 @@ The Makefile includes a `data` target that runs `dvc pull` for convenience.
 - [Camera Trap Data](https://drive.google.com/drive/folders/1Ztn79beQBbZAKcn_EdCT6QDsroFpqUq-)
 - [JaguarIdentification ReidentificationModels GitHub](https://github.com/JaguarIdentification/ReidentificationModels)
 - [Notebook to perform embeddings-based exploration and segmentation on FiftyOne](https://github.com/andandandand/practical-computer-vision/blob/main/notebooks/Jaguar_Identification_Embeddings_Based_Exploration.ipynb)
-- [Project Plan](https://docs.google.com/document/d/1AqqHKnq8Na6zL1ObF2P69lKjYgMv5NLRFdO7Kjik5n0/edit?tab=t.0#heading=h.3a0tiv3a1n6v)
-- [Project Slides](https://docs.google.com/presentation/d/1KX2jqEfPrJ5lMHUPYPqMlipiOfwCisV-8KoubId0wlk/edit?slide=id.p52#slide=id.p52)
+
+### Project Documents
+- [Project Proposal](https://docs.google.com/document/d/1BytfANvJylhKjgfPAI0kiPqtGNK5TTIx7T2rFmMZVIw)
+- [Project Plan](https://docs.google.com/document/d/1AqqHKnq8Na6zL1ObF2P69lKjYgMv5NLRFdO7Kjik5n0)
+- [Project Slides](https://docs.google.com/presentation/d/1KX2jqEfPrJ5lMHUPYPqMlipiOfwCisV-8KoubId0wlk)
 
 ## Authors
 - Mehdi Gouasmi (https://github.com/D-i-n-o)
