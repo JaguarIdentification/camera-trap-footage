@@ -154,4 +154,15 @@ dmypy.json
 
 ppo_mst_code.zip
 ppo_transformer_mstcode.zip
-/data
+
+# Keep the data directory contents out of git but allow DVC metafiles (.dvc)
+# so DVC can track data with corresponding .dvc files that are committed to Git.
+# Not sure why but using ! did not work directly on data/ so we had to
+# un-ignore specific file types and subdirectories.
+data/**/*.csv
+data/**/*.xlsx
+data/**/*.mp4
+data/**/*.AVI
+data/**/*.JPG
+data/**/*.PNG
+data/**/*.JSON
