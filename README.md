@@ -3,6 +3,15 @@ ML project to Re-Identify Jaguars as part of HPI Project Seminar.
 
 ## Setup
 
+### Requirements
+This project uses [Conda](https://docs.conda.io/en/latest/) to manage dependencies. Please make sure you have it installed.
+
+DVC is used for data versioning. Please install it by following the instructions [here](https://dvc.org/doc/install).
+
+FFMPEG is required for video processing. Please install it by following the instructions [here](https://ffmpeg.org/download.html).
+
+### Conda Setup
+
 1. Create the environment:
 ```bash
    conda env create -f "environment.yml"
@@ -10,6 +19,11 @@ ML project to Re-Identify Jaguars as part of HPI Project Seminar.
 2. Activate it:
 ```bash
    conda activate jid
+```
+
+3. Install the package in editable mode:
+```bash
+   pip install -e .
 ```
 
 Use the provided Makefile to run the tests, linter, formatter or MyPy type checker.  

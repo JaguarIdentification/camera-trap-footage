@@ -3,7 +3,7 @@ requires = ["setuptools"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "jaguar-reidentification"
+name = "jaguar_reidentification"
 version = "0.1.0"
 description = "Project to reidentify jaguar individuals as part of seminar at HPI."
 readme = "README.md"
@@ -30,7 +30,7 @@ dependencies = [
 ]
 
 [tool.setuptools.package-data]
-jaguar-reidentification = ["py.typed"]
+jaguar_reidentification = ["py.typed"]
 
 
 [tool.setuptools.packages.find]
@@ -66,16 +66,16 @@ addopts = "--strict-markers"
 testpaths = ["tests"]
 
 [tool.black]
-line-length = 120
+line-length = 150
 target-version = ["py38", "py39", "py310"]
 
 [tool.isort]
 profile = "black"
 known_third_party = ["numpy"]
-line_length = 120
+line_length = 150
 
 [tool.ruff]
-line-length = 120
+line-length = 150
 exclude = ["examples/interface.ipynb"]
 
 [tool.ruff.lint]

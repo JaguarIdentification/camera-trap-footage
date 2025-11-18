@@ -38,14 +38,15 @@ def write_df(df: pd.DataFrame, output_csv: Path) -> dict:
     logging.info("Writing cleaned labels to %s", output_csv)
     output_csv.parent.mkdir(parents=True, exist_ok=True)
     df.to_csv(output_csv, index=False)
+    columns = df.columns.tolist()
     report = {
         "row_count": len(df),
-        "columns": df.columns.tolist(),
+        "columns": columns,
         "unique_jaguar_ids": df["JAGUAR ID"].nunique(),
         "file_types": df["FILE TYPE"].value_counts().to_dict(),
         "file_extensions": df["FILE EXTENSION"].value_counts().to_dict(),
     }
-    logging.info("Saved %d cleaned rows with columns: %s", report["row_count"], ", ".join(report["columns"]))
+    logging.info("Saved %d cleaned rows with columns: %s", report["row_count"], ", ".join(columns))
     return report
 
 
@@ -255,7 +256,7 @@ def _get_file_path(row: pd.Series, file_type: str, input_dir: Path) -> str:
             # we assign a default path and check if the file exists in the next step
             dir_path = site_path / "DATA PHOTOS"
 
-    file_path = (dir_path / row["FILE NAME"]).as_posix() if dir_path is not None else None
+    file_path = (dir_path / row["ORIGINAL FILE NAME"]).as_posix() if dir_path is not None else None
     
     return file_path
 
@@ -267,7 +268,7 @@ def add_file_metadata(df: pd.DataFrame, input_dir: Path) -> tuple[pd.DataFrame, 
     file_extension_list = []
 
     for _, row in df.iterrows():
-        file_name = str(row["FILE NAME"]).strip()
+        file_name = str(row["ORIGINAL FILE NAME"]).strip()
         ext = Path(file_name).suffix.lower()
         file_type = _get_file_type(file_name)
         file_path = _get_file_path(row, file_type, input_dir)
@@ -276,6 +277,7 @@ def add_file_metadata(df: pd.DataFrame, input_dir: Path) -> tuple[pd.DataFrame, 
         file_type_list.append(file_type)
         file_paths.append(file_path)
 
+    df["RAW DATA PATH"] = input_dir.as_posix()
     df["FILE PATH"] = file_paths
     df["FILE TYPE"] = file_type_list
     df["FILE EXTENSION"] = file_extension_list
@@ -291,11 +293,11 @@ def add_file_metadata(df: pd.DataFrame, input_dir: Path) -> tuple[pd.DataFrame, 
 
 
 def check_duplicates(df: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
-    """Check for duplicate entries in (JAGUAR ID, CAMERA TRAP SITE, CAM, FILE NAME)."""
-    duplicate_mask = df.duplicated(subset=["JAGUAR ID", "CAMERA TRAP SITE", "CAM", "FILE NAME"], keep="first")
+    """Check for duplicate entries in (JAGUAR ID, CAMERA TRAP SITE, CAM, ORIGINAL FILE NAME)."""
+    duplicate_mask = df.duplicated(subset=["JAGUAR ID", "CAMERA TRAP SITE", "CAM", "ORIGINAL FILE NAME"], keep="first")
     num_duplicates = duplicate_mask.sum()
     if num_duplicates > 0:
-        logging.info("Found %d duplicate entries based on (JAGUAR ID, CAMERA TRAP SITE, CAM, FILE NAME)", num_duplicates)
+        logging.info("Found %d duplicate entries based on (JAGUAR ID, CAMERA TRAP SITE, CAM, ORIGINAL FILE NAME)", num_duplicates)
         logging.info("Duplicate entries:\n%s", df[duplicate_mask])
     report = {
         "num_duplicates": int(num_duplicates),
@@ -325,7 +327,7 @@ def split_multifile_sightings(df: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
 
         for fn in file_names:
             new_row = row.copy()
-            new_row["FILE NAME"] = fn
+            new_row["ORIGINAL FILE NAME"] = fn
             new_row["SIGHTING ID"] = str(sighting_id).zfill(5)
             new_rows.append(new_row)
         sighting_id += 1
@@ -360,7 +362,7 @@ def clean_date_formats(df: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
         return df, report
 
     # Try to parse DATE column with pandas; coerce errors to NaT
-    parsed = df["DATE"].apply(lambda x: pd.to_datetime(x, errors="coerce", infer_datetime_format=True))
+    parsed = df["DATE"].apply(lambda x: pd.to_datetime(str(x), errors="coerce"))
     num_parsed = int(parsed.notna().sum())
 
     report["unparsed_dates"] = df.loc[parsed.isna(), "DATE"].tolist()
@@ -371,7 +373,7 @@ def clean_date_formats(df: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
 
     # If TIME column exists, create DATETIME column
     if "TIME" in df.columns:
-        parsed_time = df["TIME"].apply(lambda x: pd.to_datetime(x, errors="coerce", format="%H:%M:%S"))
+        parsed_time = df["TIME"].apply(lambda x: pd.to_datetime(str(x), errors="coerce", format="%H:%M:%S"))
         df["DATETIME"] = pd.NaT
         valid_datetime_mask = parsed.notna() & parsed_time.notna()
         df.loc[valid_datetime_mask, "DATETIME"] = (
@@ -447,8 +449,6 @@ def check_required_columns(df: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
         "TIME",
         "TEMP C",
         "NOTES/ ERRORS",
-        "Gaia lat",
-        "Gaia long",
     ]
 
     # Strip whitespace from all column names
@@ -473,6 +473,18 @@ def check_required_columns(df: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
                 s = s.apply(lambda v: v.strip() if isinstance(v, str) else v)
                 s = s.replace("", pd.NA)
                 df[col] = s
+
+    # Rename NOTES/ ERRORS to NOTES
+    if "NOTES/ ERRORS" in df.columns:
+        df = df.rename(columns={"NOTES/ ERRORS": "NOTES"})
+        df["NOTES"] = df["NOTES"].fillna("")
+
+    # Remove all other columns not in required or optional
+    allowed_columns = set(required_columns + optional_columns)
+    extra_columns = [col for col in df.columns if col not in allowed_columns]
+    if extra_columns:
+        logging.info("Removing extra columns not in required/optional list: %s", ", ".join(extra_columns))
+        df = df.drop(columns=extra_columns)
 
     # Filter out rows with all required fields empty
     all_empty_mask = df[required_columns].isnull().all(axis=1)
@@ -501,11 +513,12 @@ def load_df(input_dir: Path, input_csv: Path) -> tuple[pd.DataFrame, dict]:
         df = pd.read_csv(input_path, sep=";")
         logging.info("Success: Loaded CSV file with ';' separator")
 
+    columns = df.columns.tolist()
     report = {
         "row_count": len(df),
-        "columns": df.columns.tolist(),
+        "columns": columns,
     }
-    logging.info("Loaded %d rows with columns: %s", report["row_count"], ", ".join(report["columns"]))
+    logging.info("Loaded %d rows with columns: %s", report["row_count"], ", ".join(columns))
 
     df, result = check_required_columns(df)
     report.update(result)
@@ -515,8 +528,8 @@ def load_df(input_dir: Path, input_csv: Path) -> tuple[pd.DataFrame, dict]:
 
 def run(
     input_dir: Path,
-    input_csv: Path,
     output_csv: Path,
+    input_csv: Path = Path("labels.csv"),
     generate_report: bool = False,
     auto_match_missing: bool = True,
     match_threshold: float = 0.95,
@@ -592,9 +605,9 @@ def main():
     logging.basicConfig(level=level, format="%(levelname)s: %(message)s")
     run(
         Path(args.input_dir),
-        Path(args.input_csv),
         Path(args.output_csv),
-        args.generate_report,
+        input_csv=Path(args.input_csv),
+        generate_report=args.generate_report,
         auto_match_missing=not args.no_auto_match,
         match_threshold=float(args.match_threshold),
         suggest_threshold=float(args.suggest_threshold),
