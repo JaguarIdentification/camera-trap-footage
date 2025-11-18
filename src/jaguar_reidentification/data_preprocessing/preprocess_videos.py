@@ -1,4 +1,27 @@
-"""Copy and preprocess video files for jaguar re-identification dataset."""
+"""Copy and preprocess video & image files for jaguar re-identification dataset.
+
+Takes a CSV file with columns including:
+- RAW DATA PATH: path to the root directory of the raw data
+- FILE PATH: path to the file relative to RAW DATA PATH
+- FILE EXTENSION: file extension of the file (e.g., .avi, .mp4, .jpg)
+- FILE NAME: name of the file
+- CAMERA TRAP SITE: identifier for the camera trap site
+- CAM: camera number at the site
+
+The script performs the following preprocessing steps:
+1. Flattens the directory structure by copying files to a single 'files' directory
+    with standardized filenames: <CAMERA TRAP SITE>_CAM<CAM>_<original filename>
+2. Converts .avi files to .mp4 format using ffmpeg.
+3. Updates the CSV file to reflect new file paths and extensions.
+
+The outputted CSV file contains the following columns:
+- DATASET PATH: path to the root directory of the processed dataset
+- FILE PATH: path to the file relative to DATASET PATH
+- ORIGINAL FILE EXTENSION: original file extension before conversion
+- RAW FILE PATH: original file path relative to RAW DATA PATH
+
+The FILE EXTENSION column is renamed to ORIGINAL FILE EXTENSION in the output CSV.
+"""
 
 import argparse
 import json
@@ -98,9 +121,8 @@ def convert_all_avi_to_mp4(df: pd.DataFrame, dst: Path) -> tuple[pd.DataFrame, d
             continue
 
         report["total_files"] += 1
-        src_path = Path(row["DATASET PATH"]) / row["FILE PATH"]
-        dst_path = dst / row["FILE PATH"]
-        dst_path = dst_path.with_suffix(".MP4")
+        src_path = dst / row["FILE PATH"]
+        dst_path = src_path.with_suffix(".MP4")
 
         if dst_path.exists():
             logging.info("Skipping conversion, output exists: %s", dst_path)
@@ -124,11 +146,18 @@ def convert_all_avi_to_mp4(df: pd.DataFrame, dst: Path) -> tuple[pd.DataFrame, d
     return df, report
 
 
-def copy_files(df: pd.DataFrame, dst: Path) -> pd.DataFrame:
+def flatten_files(df: pd.DataFrame, dst: Path) -> pd.DataFrame:
     df["DATASET PATH"] = dst.as_posix()
-    for _, row in df.iterrows():
+    for idx, row in df.iterrows():
         src_path = Path(row["RAW DATA PATH"]) / row["FILE PATH"]
-        dst_path = dst / row["FILE PATH"]
+
+        old_file_name = row["FILE NAME"]
+        new_file_name = (row["CAMERA TRAP SITE"] + "_CAM_" + row["CAM"] + "_" + old_file_name).replace(" ", "_")
+        dst_path = dst / "files" / new_file_name
+
+        df.loc[[idx], "RAW FILE PATH"] = row["FILE PATH"]
+        df.loc[[idx], "FILE PATH"] = dst_path.relative_to(dst).as_posix()
+
         dst_path.parent.mkdir(parents=True, exist_ok=True)
         if not dst_path.exists():
             logging.info("Copying %s -> %s", src_path, dst_path)
@@ -144,6 +173,9 @@ def check_required_columns(df: pd.DataFrame) -> pd.DataFrame:
         "RAW DATA PATH",
         "FILE PATH",
         "FILE EXTENSION",
+        "FILE NAME",
+        "CAMERA TRAP SITE",
+        "CAM",
     ]
 
     missing_columns = [col for col in required_columns if col not in df.columns]
@@ -178,7 +210,7 @@ def run(
 ) -> None:
     df = load_df(input_csv)
 
-    df = copy_files(df, output_csv.parent)
+    df = flatten_files(df, output_csv.parent)
     df, report = convert_all_avi_to_mp4(df, output_csv.parent)
 
     if "Files Name" in df.columns:
@@ -203,7 +235,7 @@ def main():
         "--output_csv",
         type=str,
         required=True,
-        help="Path to save the cleaned labels CSV file.",
+        help="Path to save the cleaned labels CSV file. Also the root directory for processed files.",
     )
     parser.add_argument(
         "--generate_report",

@@ -213,7 +213,21 @@ def auto_match_missing_paths(
     # Apply accepted matches
     if applied:
         m = {a["from"]: a["_to_"] for a in applied}
-        df.loc[missing_mask, "FILE PATH"] = df.loc[missing_mask, "FILE PATH"].map(lambda x: m.get(x, x))
+
+        # iterate over all missing rows and update
+        for idx, row in df.loc[missing_mask].iterrows():
+            df.loc[[idx], "FILE PATH"] = m.get(row["FILE PATH"], row["FILE PATH"])
+            path = Path(row["FILE PATH"])
+            
+            site = path.parts[1] if len(path.parts) > 1 else None
+            if site is not None:
+                df.loc[[idx], "CAMERA TRAP SITE"] = site
+
+            cam = path.parts[2].replace("CAM", "") if len(path.parts) > 2 else None
+            if cam is not None and cam.startswith("CAM"):
+                df.loc[[idx], "CAM"] = cam
+            
+            df.loc[[idx], "FILE NAME"] = path.name
 
     report = {
         "checked_missing": len(missing),
@@ -281,6 +295,10 @@ def add_file_metadata(df: pd.DataFrame, input_dir: Path) -> tuple[pd.DataFrame, 
     df["FILE PATH"] = file_paths
     df["FILE TYPE"] = file_type_list
     df["FILE EXTENSION"] = file_extension_list
+
+    df["FILE NAME"] = df["ORIGINAL FILE NAME"]
+    df["ORIGINAL CAM"] = df["CAM"]
+    df["ORIGINAL SITE"] = df["CAMERA TRAP SITE"]
 
     report = {
         "num_files_processed": len(df),
