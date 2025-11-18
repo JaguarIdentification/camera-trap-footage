@@ -10,6 +10,12 @@ This script processes the raw labels file, cleans the data and outputs a cleaned
 - Filtering entries with file names that do not exist in the image data.
 - Finding files that do not have an entry in the labels.
 
+Input CSV:
+- CAMERA TRAP SITE ;LATITUDE;LONGITUDE;CAMERA ID;CAM ;JAGUAR ID;LOCATION;CAMERA MODEL;DATE;TIME;TEMP C;Files Name;NOTES/ ERRORS;Gaia lat;Gaia long
+
+OUTPUT CSV:
+- CAMERA TRAP SITE,LATITUDE,LONGITUDE,CAMERA ID,CAM,JAGUAR ID,LOCATION,CAMERA MODEL,DATE,TIME,TEMP C,Files Name,DATETIME,ORIGINAL FILE NAME,SIGHTING ID,RAW DATA PATH,FILE PATH,FILE TYPE,FILE EXTENSION,FILE NAME,ORIGINAL CAM,ORIGINAL SITE
+
 A report is generated, logged and optionally saved containing processing information about each step.
 
 Run as a module:

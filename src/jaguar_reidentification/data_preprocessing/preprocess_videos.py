@@ -8,6 +8,24 @@ Takes a CSV file with columns including:
 - CAMERA TRAP SITE: identifier for the camera trap site
 - CAM: camera number at the site
 
+Further include:
+- LATITUDE
+- LONGITUDE
+- CAMERA ID
+- JAGUAR ID
+- LOCATION
+- CAMERA MODEL
+- DATE
+- TIME
+- TEMP C
+- DATETIME
+- ORIGINAL FILE NAME
+- SIGHTING ID
+- RAW DATA PATH
+- FILE TYPE
+- ORIGINAL CAM
+- ORIGINAL SITE
+
 The script performs the following preprocessing steps:
 1. Flattens the directory structure by copying files to a single 'files' directory
     with standardized filenames: <CAMERA TRAP SITE>_CAM<CAM>_<original filename>
