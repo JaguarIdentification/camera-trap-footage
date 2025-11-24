@@ -1,3 +1,10 @@
+"""Create or launch FiftyOne dataset from CSV file.
+
+Usage: 
+    python src/fiftyone/create_or_launch.py --csv path/to/labels.csv \
+        --dataset_path path/to/dataset/files --name my_dataset [--create]
+"""
+
 import fiftyone as fo
 import argparse
 import pandas as pd
@@ -22,7 +29,9 @@ def create_persistent_dataset(df: pd.DataFrame, dataset_name: str, dataset_path:
                 **{k: v for k, v in data.items() if k != "FILE PATH"},
             )
         )
-    
+
+    dataset.compute_metadata()
+
     return dataset
 
 def load_datasets_from_csv(csv_path: Path, dataset_path: Path, dataset_name: str) -> list[fo.Dataset]:
