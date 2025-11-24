@@ -3,22 +3,18 @@ sources = src tests
 # SETUP
 .PHONY: env
 env:
-	# create conda environment from environment.yml
-	conda env create -f environment.yml
+	uv venv
 
 .PHONY: update
 update:
-	# update conda environment from environment.yml
-	conda env update -f environment.yml
+	uv pip install -r requirements.txt --upgrade
 
 .PHONY: install
 install:
-	# install package in editable mode so notebooks import src/ package directly
-	pip install -e .
+	uv pip install -r requirements.txt
 
 .PHONY: data
 data:
-	# pull data tracked by DVC (requires DVC to be initialised)
 	dvc pull
 
 

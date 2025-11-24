@@ -166,3 +166,4 @@ data/**/*.AVI
 data/**/*.JPG
 data/**/*.PNG
 data/**/*.JSON
+/data

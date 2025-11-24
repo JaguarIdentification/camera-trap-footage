@@ -4,27 +4,33 @@ ML project to Re-Identify Jaguars as part of HPI Project Seminar.
 ## Setup
 
 ### Requirements
-This project uses [Conda](https://docs.conda.io/en/latest/) to manage dependencies. Please make sure you have it installed.
+This project uses [uv](https://github.com/astral-sh/uv) for fast dependency management (recommended).
 
 DVC is used for data versioning. Please install it by following the instructions [here](https://dvc.org/doc/install).
 
 FFMPEG is required for video processing. Please install it by following the instructions [here](https://ffmpeg.org/download.html).
 
-### Conda Setup
+### Quick Setup with uv (Recommended)
 
-1. Create the environment:
+1. Install uv (if not already installed):
 ```bash
-   conda env create -f "environment.yml"
-```
-2. Activate it:
-```bash
-   conda activate jid
+# On Windows
+powershell -c "irm https://astral.sh/uv/install.ps1 | iex"
+
+# On macOS/Linux
+curl -LsSf https://astral.sh/uv/install.sh | sh
 ```
 
-3. Install the package in editable mode:
+2. Create a virtual environment and install dependencies:
 ```bash
-   pip install -e .
+uv venv
+source .venv/bin/activate  # On Windows: .venv\Scripts\activate
+uv pip install -r requirements.txt
 ```
+
+Note: PyTorch will be installed automatically with CPU support. For GPU support, install PyTorch separately following [PyTorch installation guide](https://pytorch.org/get-started/locally/).
+
+### Running Quality Checks
 
 Use the provided Makefile to run the tests, linter, formatter or MyPy type checker.  
 ```bash
@@ -32,16 +38,17 @@ make all
 ```
 
 ### Update Environment
-In the unlikely case that someone changed the environment.yml file, you can update the environment with the following command: (environment should be active)
+
+**With uv:**
 ```bash
-conda env update --file environment.yml --prune
+uv pip install -r requirements.txt --upgrade
 ```
 
 ## Makefile handy targets
 
 Setup:
-- `make env` — create the conda environment from `environment.yml`.
-- `make update` — updates the conda environment from `environment.yml`.
+- `make env` — create the venv environment from `environment.yml`.
+- `make update` — updates dependencies (`uv pip install -r requirements.txt --upgrade`).
 - `make install` — pip install the package in editable mode inside the active environment.
 - `make data` — pulls data tracked by DVC (requires DVC initialized / configured remote).
 
