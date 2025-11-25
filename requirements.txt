@@ -28,6 +28,7 @@ tqdm>=4.65.0
 kaggle>=1.5.0
 gdown>=4.7.0
 decord>=0.6.0
+python-pptx>=0.6.21
 
 # Dev Tools
 black>=23.0.0
