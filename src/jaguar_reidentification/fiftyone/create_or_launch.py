@@ -5,11 +5,12 @@ Usage:
         --dataset_path path/to/dataset/files --name my_dataset [--create]
 """
 
-import fiftyone as fo
 import argparse
-import pandas as pd
 from pathlib import Path
 from typing import Any
+
+import fiftyone as fo
+import pandas as pd
 
 
 def create_persistent_dataset(df: pd.DataFrame, dataset_name: str, dataset_path: Path) -> fo.Dataset:
@@ -43,7 +44,7 @@ def create_persistent_dataset(df: pd.DataFrame, dataset_name: str, dataset_path:
             bottom = int(row["CROP BOTTOM"])
             width = int(row["IMAGE WIDTH"])
             height = int(row["IMAGE HEIGHT"])
-            
+
             # Only add bounding box if there's actual cropping
             if left > 0 or top > 0 or right < width or bottom < height:
                 # Convert to normalized coordinates [0, 1]
@@ -52,7 +53,7 @@ def create_persistent_dataset(df: pd.DataFrame, dataset_name: str, dataset_path:
                 rel_y = top / height
                 rel_width = (right - left) / width
                 rel_height = (bottom - top) / height
-                
+
                 detections.append(
                     fo.Detection(
                         label="cropped_region",
@@ -65,10 +66,10 @@ def create_persistent_dataset(df: pd.DataFrame, dataset_name: str, dataset_path:
             label=row["JAGUAR ID"] if pd.notna(row["JAGUAR ID"]) else None,
             **cleaned_data,
         )
-        
+
         if detections:
             sample["crop_box"] = fo.Detections(detections=detections)
-        
+
         dataset.add_sample(sample)
 
     dataset.compute_metadata()

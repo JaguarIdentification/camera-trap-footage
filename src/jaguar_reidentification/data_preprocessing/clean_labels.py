@@ -26,9 +26,10 @@ import argparse
 import difflib
 import json
 import logging
-import pandas as pd
-from pathlib import Path
 import re
+from pathlib import Path
+
+import pandas as pd
 
 from src.jaguar_reidentification.utils.utils import json_safe
 
@@ -121,7 +122,7 @@ def _best_match(name: str, candidates: list[str]) -> tuple[str | None, float]:
 
 def _index_existing_files(input_dir: Path) -> dict:
     """Build indexes of existing media files under input_dir/sites.
-    
+
     Returns a dict with:
     - all_paths: list of posix relative paths
     - by_site: site_name -> list of rel paths
@@ -156,7 +157,7 @@ def auto_match_missing_paths(
     suggest_threshold: float = 0.80,
 ) -> tuple[pd.DataFrame, dict]:
     """Automatically find spelling mistakes in file paths and suggest corrections.
-    
+
     For rows whose FILE PATH does not exist on disk, try to locate the correct file by fuzzy-matching the filename
     within the same site first, then globally.
     - If best score >= accept_threshold: update FILE PATH in-place.
@@ -193,18 +194,18 @@ def auto_match_missing_paths(
             # 1) Try within same site
             site_candidates = by_site.get(site, []) if site else []
             cand, score = _best_match(filename, site_candidates)
-            
+
             # 2) find by exact filename match (case-insensitive) in other sites
             if not cand or score < accept_threshold:
                 name_candidates = by_name.get(filename.lower(), [])
                 name_cand, name_score = _best_match(filename, name_candidates) if name_candidates else (cand, score)
                 if name_cand and name_score > score:
                     cand, score = name_cand, name_score
-            
+
             # 3) Fallback: try fuzzy across all files
             if not cand:
                 cand2, score2 = _best_match(filename, all_paths)
-                if (cand2 and score2 > score):
+                if cand2 and score2 > score:
                     cand, score = cand2, score2
 
             if cand and score >= accept_threshold:
@@ -224,7 +225,7 @@ def auto_match_missing_paths(
         for idx, row in df.loc[missing_mask].iterrows():
             df.loc[[idx], "FILE PATH"] = m.get(row["FILE PATH"], row["FILE PATH"])
             path = Path(row["FILE PATH"])
-            
+
             site = path.parts[1] if len(path.parts) > 1 else None
             if site is not None:
                 df.loc[[idx], "CAMERA TRAP SITE"] = site
@@ -232,7 +233,7 @@ def auto_match_missing_paths(
             cam = path.parts[2].replace("CAM", "") if len(path.parts) > 2 else None
             if cam is not None and cam.startswith("CAM"):
                 df.loc[[idx], "CAM"] = cam
-            
+
             df.loc[[idx], "FILE NAME"] = path.name
 
     report = {
@@ -277,7 +278,7 @@ def _get_file_path(row: pd.Series, file_type: str, input_dir: Path) -> str:
             dir_path = site_path / "DATA PHOTOS"
 
     file_path = (dir_path / row["ORIGINAL FILE NAME"]).as_posix() if dir_path is not None else None
-    
+
     return file_path
 
 
@@ -373,7 +374,7 @@ def clean_date_formats(df: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
 
     Normalize DATE column to ISO format YYYY-MM-DD where possible; if no DATE column
     exists or parsing fails just return input and record counts.
-    
+
     Insert DATETIME column combining DATE and TIME if both exist.
     """
     report: dict = {
@@ -400,9 +401,8 @@ def clean_date_formats(df: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
         parsed_time = df["TIME"].apply(lambda x: pd.to_datetime(str(x), errors="coerce", format="%H:%M:%S"))
         df["DATETIME"] = pd.NaT
         valid_datetime_mask = parsed.notna() & parsed_time.notna()
-        df.loc[valid_datetime_mask, "DATETIME"] = (
-            parsed[valid_datetime_mask].dt.normalize() + 
-            parsed_time[valid_datetime_mask].dt.time.apply(lambda t: pd.Timedelta(hours=t.hour, minutes=t.minute, seconds=t.second))
+        df.loc[valid_datetime_mask, "DATETIME"] = parsed[valid_datetime_mask].dt.normalize() + parsed_time[valid_datetime_mask].dt.time.apply(
+            lambda t: pd.Timedelta(hours=t.hour, minutes=t.minute, seconds=t.second)
         )
         df["DATETIME"] = df["DATETIME"].dt.strftime("%Y-%m-%d %H:%M:%S")
         df["DATETIME"] = df["DATETIME"].where(df["DATETIME"].notna(), "")
@@ -421,10 +421,7 @@ def fill_missing_jaguar_ids(df: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
     Note: This assumes that if different rows have missing JAGUAR IDs, they also correspond to different jaguars.
     If the labeler sees an individual twice they should assign their own Unknown ID consistently instead of leaving it empty.
     """
-    missing_id_mask = (
-        df["JAGUAR ID"].isnull() | 
-        (df["JAGUAR ID"].astype(str).str.lower() == "?")
-    )
+    missing_id_mask = df["JAGUAR ID"].isnull() | (df["JAGUAR ID"].astype(str).str.lower() == "?")
     num_missing = missing_id_mask.sum()
     logging.info("Filling %d missing JAGUAR IDs", num_missing)
     max_id_num = 0

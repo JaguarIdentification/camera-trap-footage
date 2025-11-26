@@ -44,10 +44,11 @@ The FILE EXTENSION column is renamed to ORIGINAL FILE EXTENSION in the output CS
 import argparse
 import json
 import logging
-import pandas as pd
-from pathlib import Path
 import shutil
 import subprocess
+from pathlib import Path
+
+import pandas as pd
 
 from src.jaguar_reidentification.utils.utils import json_safe
 
@@ -154,8 +155,8 @@ def convert_all_avi_to_mp4(df: pd.DataFrame, dst: Path) -> tuple[pd.DataFrame, d
             report["converted_files"] += 1
         else:
             report["failed_conversions"] += 1
-        
-        try: 
+
+        try:
             logging.info("Deleting original AVI file: %s", src_path)
             src_path.unlink()
         except Exception as e:
@@ -240,6 +241,7 @@ def run(
 
     if generate_report:
         write_report(report, output_csv.parent / "video_preprocessing_report.json")
+
 
 def main():
     parser = argparse.ArgumentParser(description="Clean and preprocess jaguar identification labels.")

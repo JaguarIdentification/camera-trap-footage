@@ -22,16 +22,17 @@ Run as a module:
 """
 
 import argparse
+import io
 import json
 import logging
-import pandas as pd
+import re
+import unicodedata
 from pathlib import Path
+
+import pandas as pd
+from PIL import Image
 from pptx import Presentation
 from pptx.slide import Slide
-import re
-from PIL import Image
-import io
-import unicodedata
 
 from src.jaguar_reidentification.utils.utils import json_safe
 
@@ -63,9 +64,9 @@ def extract_dates(text: str) -> list[str]:
     """Extract date information from slide text using regex patterns."""
     date_patterns = [
         r"(\d{1,2}[\/\.-]\d{1,2}[\/\.-]\d{2,4})",  # DD/MM/YYYY or DD-MM-YYYY or DD.MM.YYYY
-        r"(\d{4}[\/\.-]\d{1,2}[\/\.-]\d{1,2})",    # YYYY/MM/DD or YYYY-MM-DD or YYYY.MM.DD
-        r"(\d{1,2}\s+[A-Za-z]{3,9}\s+\d{2,4})",    # DD Month YYYY
-        r"([A-Za-z]{3,9}\s+\d{1,2},\s+\d{4})",     # Month DD, YYYY
+        r"(\d{4}[\/\.-]\d{1,2}[\/\.-]\d{1,2})",  # YYYY/MM/DD or YYYY-MM-DD or YYYY.MM.DD
+        r"(\d{1,2}\s+[A-Za-z]{3,9}\s+\d{2,4})",  # DD Month YYYY
+        r"([A-Za-z]{3,9}\s+\d{1,2},\s+\d{4})",  # Month DD, YYYY
     ]
 
     dates_found = []
@@ -99,7 +100,7 @@ def extract_fields(text: str) -> dict:
             # Extract the value and clean up extra whitespace
             value = m.group(1).strip()
             # Replace multiple whitespace with single space
-            value = re.sub(r'\s+', ' ', value)
+            value = re.sub(r"\s+", " ", value)
             fields[key] = value
         else:
             fields[key] = ""
@@ -147,53 +148,63 @@ def extract_images_from_slide(slide: Slide, slide_num: int, output_dir: Path) ->
                 ext = image.ext
                 img_filename = f"slide_{slide_num:03d}_img_{len(slide_images)+1:02d}.{ext}"
                 img_path = output_dir / img_filename
-                
+
                 # Save full image
                 with open(img_path, "wb") as f:
                     f.write(image.blob)
-                
+
                 # Get image dimensions and crop values
                 try:
                     img = Image.open(io.BytesIO(image.blob))
                     width, height = img.size
-                    
+
                     # Get crop values (as fractions, 0.0 to 1.0)
-                    crop_left = shape.crop_left if hasattr(shape, 'crop_left') else 0.0
-                    crop_top = shape.crop_top if hasattr(shape, 'crop_top') else 0.0
-                    crop_right = shape.crop_right if hasattr(shape, 'crop_right') else 0.0
-                    crop_bottom = shape.crop_bottom if hasattr(shape, 'crop_bottom') else 0.0
-                    
+                    crop_left = shape.crop_left if hasattr(shape, "crop_left") else 0.0
+                    crop_top = shape.crop_top if hasattr(shape, "crop_top") else 0.0
+                    crop_right = shape.crop_right if hasattr(shape, "crop_right") else 0.0
+                    crop_bottom = shape.crop_bottom if hasattr(shape, "crop_bottom") else 0.0
+
                     # Calculate pixel coordinates
                     left = int(width * crop_left)
                     top = int(height * crop_top)
                     right = int(width * (1 - crop_right))
                     bottom = int(height * (1 - crop_bottom))
-                    
+
                     if crop_left > 0 or crop_top > 0 or crop_right > 0 or crop_bottom > 0:
                         logging.debug(
                             "Slide %d image %d crop: left=%d, top=%d, right=%d, bottom=%d (%.1f%%, %.1f%%, %.1f%%, %.1f%%)",
-                            slide_num, len(slide_images)+1, left, top, right, bottom,
-                            crop_left*100, crop_top*100, crop_right*100, crop_bottom*100
+                            slide_num,
+                            len(slide_images) + 1,
+                            left,
+                            top,
+                            right,
+                            bottom,
+                            crop_left * 100,
+                            crop_top * 100,
+                            crop_right * 100,
+                            crop_bottom * 100,
                         )
                 except Exception as e:
                     logging.warning("Failed to get crop info from slide %d: %s", slide_num, e)
                     left, top, right, bottom = pd.NA, pd.NA, pd.NA, pd.NA
                     width, height = pd.NA, pd.NA
-                
-                slide_images.append({
-                    "filename": img_filename,
-                    "width": width,
-                    "height": height,
-                    "crop_left": left,
-                    "crop_top": top,
-                    "crop_right": right,
-                    "crop_bottom": bottom,
-                })
+
+                slide_images.append(
+                    {
+                        "filename": img_filename,
+                        "width": width,
+                        "height": height,
+                        "crop_left": left,
+                        "crop_top": top,
+                        "crop_right": right,
+                        "crop_bottom": bottom,
+                    }
+                )
             except Exception as e:
                 logging.warning("Failed to extract image from slide %d: %s", slide_num, e)
 
     fields = extract_fields(slide_text)
-    
+
     # We extract dates separately because sometimes it does not have a label
     dates = extract_dates(slide_text)
 
@@ -238,8 +249,8 @@ def create_dataframe_row(idx: int, row_data: dict, output_dir: Path, input_pptx:
 
         jaguar_id = jaguar_id.strip().upper()
         # Normalize special characters: é -> E, ñ -> N, etc.
-        jaguar_id = unicodedata.normalize('NFD', jaguar_id)
-        jaguar_id = jaguar_id.encode('ascii', 'ignore').decode('ascii')
+        jaguar_id = unicodedata.normalize("NFD", jaguar_id)
+        jaguar_id = jaguar_id.encode("ascii", "ignore").decode("ascii")
 
         # if it ends with anything in brackets just remove that part and strip again
         bracket_regex = r"^(.*?)(\s*\(.*\))$"
@@ -335,26 +346,26 @@ def create_dataframe_row(idx: int, row_data: dict, output_dir: Path, input_pptx:
 
 def fill_missing_jaguar_ids(df: pd.DataFrame) -> pd.DataFrame:
     """Fill missing JAGUAR ID entries with sex-based IDs (F1, M1, U1, etc.).
-    
+
     For each sex category (F, M, U), find the highest existing number and assign
     new sequential IDs to jaguars without names.
     """
     missing_id_mask = df["JAGUAR ID"].isna() | (df["JAGUAR ID"] == "") | (df["JAGUAR ID"] == pd.NA)
     num_missing = missing_id_mask.sum()
-    
+
     if num_missing == 0:
         logging.info("No missing JAGUAR IDs to fill")
         return df
-    
+
     logging.info("Filling %d missing JAGUAR IDs with sex-based identifiers", num_missing)
-    
+
     # Find max existing numbers for each sex prefix
     max_nums = {"F": 0, "M": 0, "U": 0}
-    
+
     id_regex = r"^(U|F|M)(\d+).*$"
     for jag_id in df.loc[~missing_id_mask, "JAGUAR ID"].astype(str):
         sex_id_match = re.match(id_regex, jag_id)
-        
+
         if sex_id_match:
             sex = sex_id_match.group(1)
             id = sex_id_match.group(2)
@@ -365,7 +376,7 @@ def fill_missing_jaguar_ids(df: pd.DataFrame) -> pd.DataFrame:
                     max_nums[sex] = num
             except ValueError:
                 continue
-        
+
     # Assign new IDs based on sex
     for idx in df[missing_id_mask].index:
         sex = df.loc[idx, "SEX"]
@@ -379,18 +390,19 @@ def fill_missing_jaguar_ids(df: pd.DataFrame) -> pd.DataFrame:
             prefix = "M"
         else:
             prefix = "U"
-        
+
         # Increment counter and assign ID
         max_nums[prefix] += 1
         new_id = f"{prefix}{max_nums[prefix]}"
         df.loc[idx, "JAGUAR ID"] = new_id
         logging.debug("Assigned ID %s to row %d (sex=%s)", new_id, idx, sex)
-    
-    logging.info("Assigned %d new JAGUAR IDs: F=%d, M=%d, U=%d", 
-        num_missing, 
+
+    logging.info(
+        "Assigned %d new JAGUAR IDs: F=%d, M=%d, U=%d",
+        num_missing,
         sum(1 for id in df.loc[missing_id_mask, "JAGUAR ID"] if id.startswith("F")),
         sum(1 for id in df.loc[missing_id_mask, "JAGUAR ID"] if id.startswith("M")),
-        sum(1 for id in df.loc[missing_id_mask, "JAGUAR ID"] if id.startswith("U"))
+        sum(1 for id in df.loc[missing_id_mask, "JAGUAR ID"] if id.startswith("U")),
     )
 
     return df

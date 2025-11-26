@@ -1,6 +1,8 @@
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
-from pathlib import Path
+
 
 def json_safe(obj: object) -> object:
     # Convert numpy/pandas/Path types to JSON-serializable forms and normalize NaN -> None

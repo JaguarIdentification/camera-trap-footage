@@ -8,10 +8,11 @@ import argparse
 import logging
 from pathlib import Path
 
-from src.jaguar_reidentification.data_preprocessing.preprocess_videos import run as preprocess_videos
 from src.jaguar_reidentification.data_preprocessing.clean_labels import run as clean_labels
+from src.jaguar_reidentification.data_preprocessing.preprocess_videos import run as preprocess_videos
 
-def run(input_path: Path, intermediate_path: Path, generate_reports: bool=True) -> None:
+
+def run(input_path: Path, intermediate_path: Path, generate_reports: bool = True) -> None:
     cleaned_labels_csv = intermediate_path / "cleaned_labels.csv"
 
     # Step 1: Clean labels
@@ -59,7 +60,7 @@ def main():
 
     if args.verbose:
         logging.basicConfig(level=logging.DEBUG, format="%(levelname)s: %(message)s")
-    
+
     input_path = Path(args.input_path)
     intermediate_path = Path(args.intermediate_path)
     run(input_path, intermediate_path, generate_reports=not args.no_reports)
