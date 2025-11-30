@@ -105,25 +105,25 @@ def add_split_column(
     column_name: str,
 ) -> tuple[pd.DataFrame, dict]:
     """Add a split assignment column to the dataframe.
-    
+
     Args:
         df: Original dataframe
         train_df: Subset assigned to training
         val_df: Subset assigned to validation
         test_df: Subset assigned to test
         column_name: Name of the column to add
-    
+
     Returns:
         Updated dataframe with split column, report dict
     """
     # Create split column initialized with None
     df[column_name] = None
-    
+
     # Assign split labels based on index
     df.loc[train_df.index, column_name] = "train"
     df.loc[val_df.index, column_name] = "val"
     df.loc[test_df.index, column_name] = "test"
-    
+
     report = {
         "column_name": column_name,
         "train_samples": len(train_df),
@@ -134,7 +134,7 @@ def add_split_column(
         "val_ids": int(val_df["JAGUAR ID"].nunique()),
         "test_ids": int(test_df["JAGUAR ID"].nunique()),
     }
-    
+
     logging.info(
         "Added '%s' column: train=%d, val=%d, test=%d",
         column_name,
@@ -142,7 +142,7 @@ def add_split_column(
         len(val_df),
         len(test_df),
     )
-    
+
     return df, report
 
 
@@ -486,7 +486,7 @@ def run(
     generate_report: bool = False,
 ) -> None:
     """Main processing function.
-    
+
     Args:
         input_csv: Path to input CSV file
         output_csv: Path to output CSV file (defaults to input_csv)
@@ -506,10 +506,10 @@ def run(
     """
     if not add_closed_set and not add_open_set:
         raise ValueError("Must specify at least one of --add_closed_set or --add_open_set")
-    
+
     if output_csv is None:
         output_csv = input_csv
-    
+
     report = {}
     df, report["input"] = load_df(input_csv)
 
@@ -523,10 +523,8 @@ def run(
             test_ratio=test_ratio,
             seed=seed,
         )
-        df, report["closed_set_output"] = add_split_column(
-            df, train_df, val_df, test_df, "closed_set_split"
-        )
-    
+        df, report["closed_set_output"] = add_split_column(df, train_df, val_df, test_df, "closed_set_split")
+
     # Add open-set split column if requested
     if add_open_set:
         logging.info("Generating open-set split...")
@@ -540,15 +538,13 @@ def run(
             shared_test_ratio=shared_test_ratio,
             seed=seed,
         )
-        df, report["open_set_output"] = add_split_column(
-            df, train_df, val_df, test_df, "open_set_split"
-        )
-    
+        df, report["open_set_output"] = add_split_column(df, train_df, val_df, test_df, "open_set_split")
+
     # Write output CSV
     logging.info("Writing output to %s", output_csv)
     output_csv.parent.mkdir(parents=True, exist_ok=True)
     df.to_csv(output_csv, index=False)
-    
+
     report["output"] = {
         "output_path": output_csv.as_posix(),
         "total_rows": len(df),
@@ -565,9 +561,7 @@ def run(
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="Add train/val/test split columns to jaguar identification dataset."
-    )
+    parser = argparse.ArgumentParser(description="Add train/val/test split columns to jaguar identification dataset.")
     parser.add_argument(
         "--input_csv",
         type=str,
