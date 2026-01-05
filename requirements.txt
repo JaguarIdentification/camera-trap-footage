@@ -1,11 +1,15 @@
 # Core ML and Deep Learning
 torch>=2.0.0
-torchvision>=0.15.0
+torchvision==0.22.0
 numpy>=1.24.0
 scipy>=1.10.0
 pandas>=2.0.0
 scikit-learn>=1.3.0
 ultralytics>=8.0.0
+transformers>=4.30.0
+timm>=0.9.0
+ipykernel
+segment-anything
 
 # Visualization
 matplotlib>=3.7.0
@@ -13,7 +17,7 @@ seaborn>=0.12.0
 
 # Experiment Tracking
 wandb[sweeps]>=0.15.0
-fiftyone>=0.21.0
+fiftyone==1.5.2
 
 # Data Management
 dvc>=3.0.0
