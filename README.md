@@ -1,63 +1,33 @@
-# Jaguar Re-Identification
-ML project to Re-Identify Jaguars as part of HPI Project Seminar.
+# Jaguar Identification (JID)
 
-## Setup
+## Overview
+This project focuses on Re-Identifying Jaguars from various data sources including camera trap videos, images, and jaguar ID guides.
 
-### Requirements
-This project uses [uv](https://github.com/astral-sh/uv) for fast dependency management (recommended).
+## Architecture
+The project is divided into three main components:
+1. **Jaguar Re-Identification**: The core pipeline for building training datasets and training re-id models.
+2. **Jaguar Orientation**: A module for determining the orientation (Left/Right/Front) of a jaguar, used to filter re-id data.
+3. **Segmentation**: A service module providing SAM3 and YOLOE segmentation capabilities.
 
-DVC is used for data versioning. Please install it by following the instructions [here](https://dvc.org/doc/install).
+For a detailed technical overview, see [ARCHITECTURE.md](ARCHITECTURE.md).
 
-FFMPEG is required for video processing. Please install it by following the instructions [here](https://ffmpeg.org/download.html).
+## Getting Started
 
-### Quick Setup with uv (Recommended)
+### Prerequisites
+*   Python 3.10+
+*   `uv` (recommended) or `pip`
+*   FFMPEG is required for video processing. Please install it by following the instructions [here](https://ffmpeg.org/download.html).
+*   DVC is used for data versioning. Please install it by following the instructions [here](https://dvc.org/doc/install).
 
-1. Install uv (if not already installed):
+### Installation
 ```bash
-# On Windows
-powershell -c "irm https://astral.sh/uv/install.ps1 | iex"
-
-# On macOS/Linux
-curl -LsSf https://astral.sh/uv/install.sh | sh
-```
-
-2. Create a virtual environment and install dependencies:
-```bash
-uv venv
-source .venv/bin/activate  # On Windows: .venv\Scripts\activate
+# Install dependencies
 uv pip install -r requirements.txt
+pip install -e .
+
+# Install generic SAM3 dependencies
+pip install git+https://github.com/huggingface/transformers.git#egg=transformers
 ```
-
-Note: PyTorch will be installed automatically with CPU support. For GPU support, install PyTorch separately following [PyTorch installation guide](https://pytorch.org/get-started/locally/).
-
-### Running Quality Checks
-
-Use the provided Makefile to run the tests, linter, formatter or MyPy type checker.  
-```bash
-make all
-```
-
-### Update Environment
-
-**With uv:**
-```bash
-uv pip install -r requirements.txt --upgrade
-```
-
-## Makefile handy targets
-
-Setup:
-- `make env` — create the venv environment from `environment.yml`.
-- `make update` — updates dependencies (`uv pip install -r requirements.txt --upgrade`).
-- `make install` — pip install the package in editable mode inside the active environment.
-- `make data` — pulls data tracked by DVC (requires DVC initialized / configured remote).
-
-Analysis & Tests:
-- `make format`
-- `make lint`
-- `make mypy`
-- `make all` (runs all of the above)
-- `make test`
 
 ## Data management with DVC
 
@@ -75,7 +45,7 @@ git add .dvc .dvcignore
 git commit -m "chore: init dvc"
 ```
 
-- TODO Authenticate (everyone once)
+- Authenticate (everyone once)
 
 - Add a (large) dataset and push to remote (example):
 ```bash
@@ -100,6 +70,14 @@ dvc pull
 ```
 
 The Makefile includes a `data` target that runs `dvc pull` for convenience.
+
+## Project Structure
+*   `src/jaguars/ingestion`: Data ingestion and preprocessing.
+*   `src/jaguars/reidentification`: Main reidentification pipeline logic.
+*   `src/jaguars/orientation`: Orientation classification.
+*   `src/jaguars/segmentation`: Object detection/segmentation wrappers.
+*   `src/jaguars/common`: Shared utilities.
+*   `data/`: Data storage (dvc tracked).
 
 ## Further Resources
 - [Huggingface Jaguar Dataset](https://huggingface.co/datasets/jaguaridentification/jaguars)

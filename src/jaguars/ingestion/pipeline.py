@@ -1,0 +1,163 @@
+"""Ingestion pipeline orchestration.
+
+This module wires together ingestion loaders (CSV, PPTX, etc.) via function
+arguments (no config classes).
+
+It is designed to be callable as:
+- Python function from notebooks
+- CLI module: `python -m src.ingestion.pipeline \
+    --input-dir "data/raw/17_11_2025" \
+    --pptx "data/raw/17_11_2025/CAMERA TRAP ID GUIDE UPDATED by Oscar2025.pptx"`
+"""
+
+from __future__ import annotations
+
+import argparse
+from pathlib import Path
+
+import fiftyone as fo
+
+from jaguars.common.config import JID_MASTER_DATASET
+from jaguars.common.logging_utils import setup_logger
+from jaguars.ingestion.loaders.csv_loader import ingest_csv_labels
+from jaguars.ingestion.loaders.pptx_loader import ingest_pptx_slides
+
+logger = setup_logger("ingestion.pipeline")
+
+
+def run_ingestion_pipeline(
+    *,
+    input_dir: Path | None = None,
+    labels_csv: Path | None = None,
+    pptx_path: Path | None = None,
+    dataset_name: str = JID_MASTER_DATASET,
+    export_dir: Path | None = Path("data/intermediate/v1/fo_jaguars/ingested"),
+    pptx_media_dir: Path | None = None,
+    pptx_detections_field: str = "pptx_detections",
+    auto_match_missing: bool = True,
+    match_threshold: float = 0.95,
+    suggest_threshold: float = 0.80,
+) -> dict[str, fo.Dataset]:
+    """Runs ingestion from the specified sources.
+
+    Args:
+        input_dir: Raw data root (required for CSV ingestion).
+        labels_csv: Raw labels CSV path (absolute or relative to input_dir).
+        pptx_path: PPTX file to ingest.
+        dataset_name: FiftyOne dataset for images.
+        export_dir: Directory to export the ingested FiftyOne dataset.
+        pptx_media_dir: Optional directory to store PPTX-derived images.
+        pptx_detections_field: Field name to store PPTX crop boxes as `fo.Detections`.
+        auto_match_missing: Whether to auto-match missing samples during CSV ingestion.
+        match_threshold: Similarity threshold for auto-matching samples during CSV ingestion.
+        suggest_threshold: Similarity threshold for suggesting matches during CSV ingestion.
+
+    Returns:
+        Dict with keys: "images", "videos".
+    """
+    results: dict[str, fo.Dataset] = {}
+
+    if labels_csv is not None:
+        if input_dir is None:
+            raise ValueError("input_dir is required when labels_csv is provided")
+
+        logger.info("Running CSV loader: %s (dataset=%s)", labels_csv, dataset_name)
+        ds = ingest_csv_labels(
+            input_dir=Path(input_dir),
+            input_csv=Path(labels_csv),
+            dataset_name=dataset_name,
+            auto_match_missing=auto_match_missing,
+            match_threshold=match_threshold,
+            suggest_threshold=suggest_threshold,
+        )
+
+        # Short assertions to ensure expected state
+        assert isinstance(ds, fo.Dataset), "CSV loader did not return a FiftyOne dataset"
+        assert ds.group_field is not None, "Expected grouped dataset with 'image' and 'video' slices"
+        try:
+            _ = ds.select_group_slices("image")
+            _ = ds.select_group_slices("video")
+        except Exception as e:
+            raise AssertionError("Expected accessible 'image' and 'video' slices") from e
+
+        results["dataset"] = ds
+        results["images"] = ds.select_group_slices("image")
+        results["videos"] = ds.select_group_slices("video")
+
+    if pptx_path is not None:
+        logger.info("Running PPTX loader: %s (dataset=%s)", pptx_path, dataset_name)
+        ds = ingest_pptx_slides(
+            pptx_path=Path(pptx_path),
+            dataset_name=dataset_name,
+            media_dir=pptx_media_dir,
+            detections_field=pptx_detections_field,
+        )
+
+        # Short assertions
+        assert isinstance(ds, fo.Dataset), "PPTX loader did not return a FiftyOne dataset"
+        assert ds.name == dataset_name, "PPTX loader ingested into unexpected dataset"
+
+        # Refresh images slice after PPTX additions
+        results.setdefault("dataset", ds)
+        results["images"] = results["dataset"].select_group_slices("image")
+        results["videos"] = results["dataset"].select_group_slices("video")
+
+    if "dataset" not in results:
+        raise ValueError("No ingestion sources were provided")
+
+    results["dataset"].export(
+        export_dir=export_dir,
+        dataset_type=fo.types.FiftyOneDataset,
+        overwrite=True,
+    )
+
+    return results
+
+
+def _parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser(description="Ingest raw sources into FiftyOne datasets")
+    p.add_argument("--input_dir", type=str, default=None, help="Raw data directory (contains 'sites/')")
+    p.add_argument("--labels_csv", type=str, default=None, help="Raw labels CSV path (absolute or relative to input_dir)")
+    p.add_argument("--pptx", type=str, action="append", default=None, help="PPTX file path (repeatable)")
+
+    p.add_argument("--dataset", type=str, default=JID_MASTER_DATASET)
+
+    p.add_argument("--pptx_media_dir", type=str, default=None)
+    p.add_argument("--export_dir", type=Path, default=Path("data/intermediate/v1/fo_jaguars/ingested"))
+    p.add_argument("--pptx_detections_field", type=str, default="pptx_detections")
+
+    p.add_argument("--no_auto_match", action="store_true")
+    p.add_argument("--match_threshold", type=float, default=0.95)
+    p.add_argument("--suggest_threshold", type=float, default=0.80)
+
+    return p.parse_args()
+
+
+def main() -> int:
+    args = _parse_args()
+
+    pptx_path = Path(args.pptx) if args.pptx else None
+    input_dir = Path(args.input_dir) if args.input_dir else None
+    labels_csv = Path(args.labels_csv) if args.labels_csv else None
+    pptx_media_dir = Path(args.pptx_media_dir) if args.pptx_media_dir else None
+    export_dir = Path(args.export_dir) if args.export_dir else None
+
+    run_ingestion_pipeline(
+        input_dir=input_dir,
+        labels_csv=labels_csv,
+        pptx_path=pptx_path,
+        dataset_name=args.dataset,
+        export_dir=export_dir,
+        pptx_media_dir=pptx_media_dir,
+        pptx_detections_field=args.pptx_detections_field,
+        auto_match_missing=not args.no_auto_match,
+        match_threshold=float(args.match_threshold),
+        suggest_threshold=float(args.suggest_threshold),
+    )
+
+    logger.info("Ingestion pipeline complete")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
