@@ -29,10 +29,10 @@ import fiftyone as fo  # type: ignore
 import pandas as pd
 from PIL import Image
 from pptx import Presentation
-from pptx.slide import Slide
 from pptx.shapes.picture import Picture
+from pptx.slide import Slide
 
-from jaguars.common.config import JID_MASTER_DATASET, GROUP_FIELD_NAME, DEFAULT_GROUP_SLICE
+from jaguars.common.config import DEFAULT_GROUP_SLICE, GROUP_FIELD_NAME, JID_MASTER_DATASET
 from jaguars.common.fiftyone_utils import get_or_create_dataset
 from jaguars.common.io_utils import ensure_dir
 from jaguars.common.logging_utils import setup_logger
@@ -172,12 +172,12 @@ def ingest_pptx_slides(
         raise FileNotFoundError(f"Input PowerPoint file not found: {pptx_path}")
 
     dataset = get_or_create_dataset(dataset_name)
-    
+
     # Set up group field if not already configured
     if dataset.group_field is None:
         dataset.add_group_field(GROUP_FIELD_NAME, default=DEFAULT_GROUP_SLICE)
         logger.info("Configured grouped dataset with 'image' and 'video' slices")
-    
+
     if media_dir is None:
         media_dir = _pptx_media_dir(dataset, dataset_name)
     ensure_dir(media_dir)
@@ -226,10 +226,11 @@ def ingest_pptx_slides(
 
         # Each image gets its own group ID in the 'image' slice
         import uuid
+
         group_id = str(uuid.uuid4())
         sample = fo.Sample(filepath=str(image_path), group=fo.Group().element(group_id))
         sample.group.name = DEFAULT_GROUP_SLICE
-        
+
         sample["source_type"] = "pptx"
         sample["source"] = "pptx_camera_trap_guide_17_11_2025"
         sample["pptx_source"] = pptx_path.as_posix()
@@ -240,6 +241,7 @@ def ingest_pptx_slides(
         # Store the canonical fields used downstream
         if pd.notna(row.get("JAGUAR ID")):
             sample["jaguar_id"] = str(row["JAGUAR ID"])
+            sample["ground_truth"] = fo.Classification(label=str(row["JAGUAR ID"]))
         if pd.notna(row.get("CAMERA TRAP SITE")):
             sample["site"] = str(row["CAMERA TRAP SITE"])
         if pd.notna(row.get("SEX")):

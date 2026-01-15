@@ -13,19 +13,20 @@ Usage (via CLI):
         --generate-report \
         --verbose
 """
+
 import argparse
 import difflib
 import json
 import logging
 import re
+import uuid
 from pathlib import Path
 from typing import Any
-import uuid
 
 import fiftyone as fo
 import pandas as pd
 
-from jaguars.common.config import JID_MASTER_DATASET, GROUP_FIELD_NAME, DEFAULT_GROUP_SLICE
+from jaguars.common.config import DEFAULT_GROUP_SLICE, GROUP_FIELD_NAME, JID_MASTER_DATASET, VIDEO_GROUP_SLICE
 from jaguars.common.fiftyone_utils import get_or_create_dataset
 from jaguars.common.logging_utils import setup_logger
 from jaguars.ingestion.loaders.video_utils import batch_convert_avi
@@ -104,6 +105,7 @@ def _as_path(input_dir: Path, maybe_rel: Path) -> Path:
         return maybe_rel
     return input_dir / maybe_rel
 
+
 def _json_safe(obj: Any) -> Any:
     """Convert objects to JSON-serializable format."""
     if isinstance(obj, (str, int, float, bool, type(None))):
@@ -132,7 +134,7 @@ def find_videos_without_labels(df: pd.DataFrame, input_dir: Path) -> tuple[pd.Da
     labeled_files = set()
     if len(df) > 0 and "FILE PATH" in df.columns:
         labeled_files = set(df["FILE PATH"].dropna().astype(str).tolist())
-    
+
     all_video_files = set()
 
     for ext in [".MP4", ".mp4", ".mov", ".MOV", ".avi", ".AVI"]:
@@ -524,7 +526,9 @@ def clean_date_formats(df: pd.DataFrame) -> tuple[pd.DataFrame, dict[str, Any]]:
         parsed_time = df["TIME"].apply(lambda x: pd.to_datetime(str(x), errors="coerce", format="%H:%M:%S"))
         df["DATETIME"] = pd.NaT
         valid_datetime_mask = parsed.notna() & parsed_time.notna()
-        df.loc[valid_datetime_mask, "DATETIME"] = parsed.loc[valid_datetime_mask].dt.strftime("%Y-%m-%d") + " " + parsed_time.loc[valid_datetime_mask].dt.strftime("%H:%M:%S")  # noqa: E501
+        df.loc[valid_datetime_mask, "DATETIME"] = (
+            parsed.loc[valid_datetime_mask].dt.strftime("%Y-%m-%d") + " " + parsed_time.loc[valid_datetime_mask].dt.strftime("%H:%M:%S")
+        )  # noqa: E501
 
     report["dates_parsed"] = num_parsed
     report["total_rows"] = len(df)
@@ -722,17 +726,17 @@ def ingest_csv_labels(
 
     # Create or load grouped dataset with image and video slices
     dataset = get_or_create_dataset(dataset_name)
-    
+
     # Set up group field if not already configured
     if dataset.group_field is None:
         dataset.add_group_field(GROUP_FIELD_NAME, default=DEFAULT_GROUP_SLICE)
         logger.info("Configured grouped dataset with 'image' and 'video' slices")
-    
+
     # Get existing filepaths from all slices to avoid duplicates
     if len(dataset) > 0:
         # For grouped datasets, we need to get filepaths from all slices
         all_filepaths = set()
-        for slice_name in ["image", "video"]:
+        for slice_name in [DEFAULT_GROUP_SLICE, VIDEO_GROUP_SLICE]:
             try:
                 slice_view = dataset.select_group_slices(slice_name)
                 all_filepaths.update(slice_view.values("filepath"))
@@ -759,7 +763,7 @@ def ingest_csv_labels(
             continue
 
         file_type = str(row.get("FILE TYPE") or "UNKNOWN").upper()
-        slice_name = "video" if file_type == "VIDEO" else "image"
+        slice_name = VIDEO_GROUP_SLICE if file_type == "VIDEO" else DEFAULT_GROUP_SLICE
 
         # Each CSV row gets its own group ID (UUID-based to ensure uniqueness)
         group_id = str(uuid.uuid4())
@@ -774,6 +778,7 @@ def ingest_csv_labels(
         # Canonical downstream fields
         if pd.notna(row.get("JAGUAR ID")):
             sample["jaguar_id"] = str(row.get("JAGUAR ID"))
+            sample["ground_truth"] = fo.Classification(label=str(row.get("JAGUAR ID")))
         if pd.notna(row.get("CAMERA TRAP SITE")):
             sample["site"] = str(row.get("CAMERA TRAP SITE"))
         if pd.notna(row.get("CAM")):
@@ -800,8 +805,8 @@ def ingest_csv_labels(
 
         new_samples.append(sample)
         existing_filepaths.add(str(abs_path))
-        
-        if slice_name == "video":
+
+        if slice_name == VIDEO_GROUP_SLICE:
             new_video_count += 1
         else:
             new_image_count += 1
@@ -809,20 +814,19 @@ def ingest_csv_labels(
     if new_samples:
         dataset.add_samples(new_samples)
         dataset.save()
-        logger.info("Added %d samples to grouped dataset (%d images, %d videos)", 
-                   len(new_samples), new_image_count, new_video_count)
+        logger.info("Added %d samples to grouped dataset (%d images, %d videos)", len(new_samples), new_image_count, new_video_count)
     else:
         logger.info("No new samples to add")
 
     # Get slice counts
-    image_slice = dataset.select_group_slices("image")
-    video_slice = dataset.select_group_slices("video")
-    
+    image_slice = dataset.select_group_slices(DEFAULT_GROUP_SLICE)
+    video_slice = dataset.select_group_slices(VIDEO_GROUP_SLICE)
+
     # Log ingestion summary
     summary = {
         "dataset_name": dataset_name,
         "is_grouped": True,
-        "slices": ["image", "video"],
+        "slices": [DEFAULT_GROUP_SLICE, VIDEO_GROUP_SLICE],
         "csv_source": str(csv_path),
         "new_image_samples_added": new_image_count,
         "new_video_samples_added": new_video_count,

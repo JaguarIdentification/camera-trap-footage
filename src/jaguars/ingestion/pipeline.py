@@ -6,7 +6,7 @@ arguments (no config classes).
 It is designed to be callable as:
 - Python function from notebooks
 - CLI module: `python -m src.ingestion.pipeline \
-    --input-dir "data/raw/17_11_2025" \
+    --input_dir "data/raw/17_11_2025" \
     --pptx "data/raw/17_11_2025/CAMERA TRAP ID GUIDE UPDATED by Oscar2025.pptx"`
 """
 
@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
+from typing import Any
 
 import fiftyone as fo
 
@@ -37,6 +38,7 @@ def run_ingestion_pipeline(
     auto_match_missing: bool = True,
     match_threshold: float = 0.95,
     suggest_threshold: float = 0.80,
+    overwrite: bool = False,
 ) -> dict[str, fo.Dataset]:
     """Runs ingestion from the specified sources.
 
@@ -51,38 +53,42 @@ def run_ingestion_pipeline(
         auto_match_missing: Whether to auto-match missing samples during CSV ingestion.
         match_threshold: Similarity threshold for auto-matching samples during CSV ingestion.
         suggest_threshold: Similarity threshold for suggesting matches during CSV ingestion.
+        overwrite: Whether to overwrite existing datasets.
 
     Returns:
         Dict with keys: "images", "videos".
     """
     results: dict[str, fo.Dataset] = {}
 
-    if labels_csv is not None:
-        if input_dir is None:
-            raise ValueError("input_dir is required when labels_csv is provided")
+    if overwrite and fo.dataset_exists(dataset_name):
+        logger.info("Deleting existing dataset: %s", dataset_name)
+        fo.delete_dataset(dataset_name)
 
-        logger.info("Running CSV loader: %s (dataset=%s)", labels_csv, dataset_name)
-        ds = ingest_csv_labels(
-            input_dir=Path(input_dir),
-            input_csv=Path(labels_csv),
-            dataset_name=dataset_name,
-            auto_match_missing=auto_match_missing,
-            match_threshold=match_threshold,
-            suggest_threshold=suggest_threshold,
-        )
+    if input_dir is not None:
+        logger.info("Running CSV loader: %s (labels_csv=%s, dataset=%s)", input_dir, labels_csv, dataset_name)
+        csv_kwargs: dict[str, Any] = {
+            "input_dir": Path(input_dir),
+            "dataset_name": dataset_name,
+            "auto_match_missing": auto_match_missing,
+            "match_threshold": match_threshold,
+            "suggest_threshold": suggest_threshold,
+        }
+        if labels_csv is not None:
+            csv_kwargs["input_csv"] = Path(labels_csv)
+        ds = ingest_csv_labels(**csv_kwargs)
 
         # Short assertions to ensure expected state
         assert isinstance(ds, fo.Dataset), "CSV loader did not return a FiftyOne dataset"
         assert ds.group_field is not None, "Expected grouped dataset with 'image' and 'video' slices"
         try:
-            _ = ds.select_group_slices("image")
-            _ = ds.select_group_slices("video")
+            results["images"] = ds.select_group_slices("image")
+            results["videos"] = ds.select_group_slices("video")
         except Exception as e:
             raise AssertionError("Expected accessible 'image' and 'video' slices") from e
 
         results["dataset"] = ds
-        results["images"] = ds.select_group_slices("image")
-        results["videos"] = ds.select_group_slices("video")
+    else:
+        logger.warning("No labels_csv provided; skipping CSV ingestion")
 
     if pptx_path is not None:
         logger.info("Running PPTX loader: %s (dataset=%s)", pptx_path, dataset_name)
@@ -100,25 +106,29 @@ def run_ingestion_pipeline(
         # Refresh images slice after PPTX additions
         results.setdefault("dataset", ds)
         results["images"] = results["dataset"].select_group_slices("image")
-        results["videos"] = results["dataset"].select_group_slices("video")
+    else:
+        logger.warning("No pptx_path provided; skipping PPTX ingestion")
 
     if "dataset" not in results:
         raise ValueError("No ingestion sources were provided")
 
-    results["dataset"].export(
-        export_dir=export_dir,
-        dataset_type=fo.types.FiftyOneDataset,
-        overwrite=True,
-    )
+    if export_dir is not None:
+        results["dataset"].export(
+            export_dir=export_dir.as_posix(),
+            dataset_type=fo.types.FiftyOneDataset,
+            overwrite=True,
+        )
+    else:
+        logger.warning("No export_dir provided; skipping dataset export")
 
     return results
 
 
 def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Ingest raw sources into FiftyOne datasets")
-    p.add_argument("--input_dir", type=str, default=None, help="Raw data directory (contains 'sites/')")
+    p.add_argument("--input_dir", type=str, required=True, help="Raw data directory")
     p.add_argument("--labels_csv", type=str, default=None, help="Raw labels CSV path (absolute or relative to input_dir)")
-    p.add_argument("--pptx", type=str, action="append", default=None, help="PPTX file path (repeatable)")
+    p.add_argument("--pptx", type=str, required=True, help="PPTX file path")
 
     p.add_argument("--dataset", type=str, default=JID_MASTER_DATASET)
 
@@ -129,6 +139,8 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--no_auto_match", action="store_true")
     p.add_argument("--match_threshold", type=float, default=0.95)
     p.add_argument("--suggest_threshold", type=float, default=0.80)
+
+    p.add_argument("--overwrite", action="store_true", default=False)
 
     return p.parse_args()
 
@@ -153,6 +165,7 @@ def main() -> int:
         auto_match_missing=not args.no_auto_match,
         match_threshold=float(args.match_threshold),
         suggest_threshold=float(args.suggest_threshold),
+        overwrite=args.overwrite,
     )
 
     logger.info("Ingestion pipeline complete")

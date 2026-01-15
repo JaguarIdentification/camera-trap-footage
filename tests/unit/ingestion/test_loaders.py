@@ -94,13 +94,13 @@ class TestLoaders(unittest.TestCase):
 
         # Dataset should be grouped with image and video slices
         self.assertIsNotNone(dataset.group_field)
-        
+
         # Check slices - each CSV row creates samples in the grouped dataset
         image_slice = dataset.select_group_slices("image")
         video_slice = dataset.select_group_slices("video")
         self.assertEqual(len(image_slice), 1)
         self.assertEqual(len(video_slice), 1)
-        
+
         # Check metadata
         self.assertEqual(image_slice.first()["source_type"], "csv")
         self.assertEqual(video_slice.first()["source_type"], "csv")
@@ -115,6 +115,7 @@ class TestLoaders(unittest.TestCase):
         # Should still have same number of samples in each slice
         self.assertEqual(len(dataset2.select_group_slices("image")), 1)
         self.assertEqual(len(dataset2.select_group_slices("video")), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

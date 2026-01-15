@@ -17,6 +17,9 @@ install:
 data:
 	dvc pull
 
+.PHONY: ui
+ui:
+	fiftyone app launch	
 
 # ANALYSIS AND TESTING
 .PHONY: format

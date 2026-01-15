@@ -1,7 +1,7 @@
+from pathlib import Path
 from typing import Any
 
 import fiftyone as fo
-from pathlib import Path
 
 from jaguars.common.logging_utils import setup_logger
 

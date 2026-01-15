@@ -37,6 +37,8 @@ The goal is to strictly separate "loading data" from "processing data". This mod
     - Uses OpenCV for frame extraction.
     - Full CLI support and logging.
     - See `processing/README.md` for usage examples.
+- `compute_metadata.py`:
+    - Computes and updates metadata for videos/images in the dataset.
 - `split.py`:
     - closed set train/test splitting.
     - optionally open set

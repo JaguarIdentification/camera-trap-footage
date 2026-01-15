@@ -10,12 +10,12 @@ TEST_FIXTURES_DIR = DATA_DIR / "test_fixtures"
 
 # FiftyOne Dataset Names
 JID_MASTER_DATASET = "JID_Master_Dataset"
-DATASET_REID_CROPS = "JID_ReID_Crops"
 
 # FiftyOne Group Field Configuration
 GROUP_FIELD_NAME = "group"
 DEFAULT_GROUP_SLICE = "image"
+VIDEO_GROUP_SLICE = "video"
 
 # Processing
-DEFAULT_IMAGE_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.bmp', '.tiff', '.tif'}
-DEFAULT_VIDEO_EXTENSIONS = {'.mp4', '.avi', '.mov', '.mkv'}
+DEFAULT_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".tif"}
+DEFAULT_VIDEO_EXTENSIONS = {".mp4", ".avi", ".mov", ".mkv"}
