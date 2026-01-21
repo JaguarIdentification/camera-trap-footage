@@ -26,39 +26,21 @@ from jaguars.ingestion.loaders.pptx_loader import ingest_pptx_slides
 logger = setup_logger("ingestion.pipeline")
 
 
-def run_ingestion_pipeline(
+def run_data_loaders(
     *,
     input_dir: Path | None = None,
     labels_csv: Path | None = None,
     pptx_path: Path | None = None,
     dataset_name: str = JID_MASTER_DATASET,
-    export_dir: Path | None = Path("data/intermediate/v1/fo_jaguars/ingested"),
     pptx_media_dir: Path | None = None,
     pptx_detections_field: str = "pptx_detections",
     auto_match_missing: bool = True,
     match_threshold: float = 0.95,
     suggest_threshold: float = 0.80,
     overwrite: bool = False,
-) -> dict[str, fo.Dataset]:
-    """Runs ingestion from the specified sources.
-
-    Args:
-        input_dir: Raw data root (required for CSV ingestion).
-        labels_csv: Raw labels CSV path (absolute or relative to input_dir).
-        pptx_path: PPTX file to ingest.
-        dataset_name: FiftyOne dataset for images.
-        export_dir: Directory to export the ingested FiftyOne dataset.
-        pptx_media_dir: Optional directory to store PPTX-derived images.
-        pptx_detections_field: Field name to store PPTX crop boxes as `fo.Detections`.
-        auto_match_missing: Whether to auto-match missing samples during CSV ingestion.
-        match_threshold: Similarity threshold for auto-matching samples during CSV ingestion.
-        suggest_threshold: Similarity threshold for suggesting matches during CSV ingestion.
-        overwrite: Whether to overwrite existing datasets.
-
-    Returns:
-        Dict with keys: "images", "videos".
-    """
-    results: dict[str, fo.Dataset] = {}
+) -> dict[str, Any]:
+    """Runs data loaders to ingest raw data into FiftyOne datasets."""
+    results: dict[str, Any] = {}
 
     if overwrite and fo.dataset_exists(dataset_name):
         logger.info("Deleting existing dataset: %s", dataset_name)
@@ -109,8 +91,82 @@ def run_ingestion_pipeline(
     else:
         logger.warning("No pptx_path provided; skipping PPTX ingestion")
 
-    if "dataset" not in results:
-        raise ValueError("No ingestion sources were provided")
+    return results
+
+
+def run_processing_pipeline() -> dict[str, Any]:
+    """Runs processing steps on the ingested dataset.
+
+    Returns:
+        Dict with processing results.
+    """
+    results: dict[str, Any] = {}
+
+    # 1. sample
+    # 2. compute metadata
+    # 3. segmentation
+    # 4. add embeddings
+    # 5. split
+    # 6. deduplicate
+
+    return results
+
+
+def run_ingestion_pipeline(
+    *,
+    input_dir: Path | None = None,
+    labels_csv: Path | None = None,
+    pptx_path: Path | None = None,
+    dataset_name: str = JID_MASTER_DATASET,
+    export_dir: Path | None = Path("data/intermediate/v1/fo_jaguars/ingested"),
+    pptx_media_dir: Path | None = None,
+    pptx_detections_field: str = "pptx_detections",
+    auto_match_missing: bool = True,
+    match_threshold: float = 0.95,
+    suggest_threshold: float = 0.80,
+    overwrite: bool = False,
+) -> dict[str, Any]:
+    """Runs ingestion from the specified sources.
+
+    Args:
+        input_dir: Raw data root (required for CSV ingestion).
+        labels_csv: Raw labels CSV path (absolute or relative to input_dir).
+        pptx_path: PPTX file to ingest.
+        dataset_name: FiftyOne dataset for images.
+        export_dir: Directory to export the ingested FiftyOne dataset.
+        pptx_media_dir: Optional directory to store PPTX-derived images.
+        pptx_detections_field: Field name to store PPTX crop boxes as `fo.Detections`.
+        auto_match_missing: Whether to auto-match missing samples during CSV ingestion.
+        match_threshold: Similarity threshold for auto-matching samples during CSV ingestion.
+        suggest_threshold: Similarity threshold for suggesting matches during CSV ingestion.
+        overwrite: Whether to overwrite existing datasets.
+
+    Returns:
+        Dict with keys: "images", "videos".
+    """
+    results: dict[str, Any] = {}
+
+    results["loaders"] = run_data_loaders(
+        input_dir=input_dir,
+        labels_csv=labels_csv,
+        pptx_path=pptx_path,
+        dataset_name=dataset_name,
+        pptx_media_dir=pptx_media_dir,
+        pptx_detections_field=pptx_detections_field,
+        auto_match_missing=auto_match_missing,
+        match_threshold=match_threshold,
+        suggest_threshold=suggest_threshold,
+        overwrite=overwrite,
+    )
+
+    if "dataset" in results["loaders"]:
+        results["dataset"] = results["loaders"]["dataset"]
+    elif dataset_name in fo.list_datasets():
+        results["dataset"] = fo.load_dataset(dataset_name)
+    else:
+        raise ValueError("No dataset was created during ingestion and no existing dataset found with the name: " + dataset_name)
+
+    results["processing"] = run_processing_pipeline()
 
     if export_dir is not None:
         results["dataset"].export(
