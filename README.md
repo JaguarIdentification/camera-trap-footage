@@ -26,7 +26,7 @@ uv pip install -r requirements.txt
 pip install -e .
 
 # Install generic SAM3 dependencies
-pip install git+https://github.com/huggingface/transformers.git#egg=transformers
+pip install -q git+https://github.com/huggingface/transformers.git#egg=transformers
 ```
 
 ## Data management with DVC
