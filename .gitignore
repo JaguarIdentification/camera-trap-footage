@@ -4,6 +4,8 @@ kaggle.json
 # Local dvc cache
 .dvc/cache/
 
+*/.DS_Store
+
 # IDE
 .vscode/
 .idea/

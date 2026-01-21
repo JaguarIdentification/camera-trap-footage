@@ -84,8 +84,15 @@ def sample_videos_with_fiftyone(videos: list, output_dir: Path, fps: float, fmt:
         sample = fo.Sample(filepath=str(video_path))
         samples.append(sample)
     
-    # Create a temporary dataset
-    dataset = fo.Dataset("temp_video_sampling")
+    # Create a temporary dataset with unique name
+    import time
+    dataset_name = f"temp_video_sampling_{int(time.time())}"
+    
+    # Delete if exists
+    if dataset_name in fo.list_datasets():
+        fo.delete_dataset(dataset_name)
+    
+    dataset = fo.Dataset(dataset_name)
     dataset.add_samples(samples)
     
     try:
@@ -115,6 +122,36 @@ def sample_videos_with_fiftyone(videos: list, output_dir: Path, fps: float, fmt:
         dataset.delete()
 
 
+def cleanup_frames(output_dir: Path):
+
+    total_deleted = 0
+    for video_dir in output_dir.iterdir():
+        if not video_dir.is_dir():
+            continue
+        
+        # Get all frame files
+        frames = sorted(video_dir.glob("*.jpg")) + sorted(video_dir.glob("*.png"))
+        
+        for frame_path in frames:
+            # Extract frame number from filename (e.g., 000006.jpg -> 6)
+            try:
+                frame_num = int(frame_path.stem)
+            except ValueError:
+                continue
+            
+            # Frame numbers correspond to seconds (since we sample at 1 fps)
+            # Keep frames 1-5 (0-4 seconds)
+            if frame_num <= 5:
+                continue
+            
+            # After frame 5, keep only frames at 10, 15, 20, 25... (every 5 seconds)
+            if (frame_num - 5) % 5 != 0:
+                frame_path.unlink()
+                total_deleted += 1
+    
+    print(f"Deleted {total_deleted} frames")
+
+
 def main():
     config = parse_args()
 
@@ -134,6 +171,10 @@ def main():
 
     try:
         sample_videos_with_fiftyone(videos, config.output, config.fps, config.fmt)
+        
+        # Clean up unwanted frames
+        cleanup_frames(config.output)
+        
         print("Done.")
     except Exception as e:
         print(f"Video sampling failed: {e}", file=sys.stderr)
