@@ -1,4 +1,4 @@
-"""SAM3 Segmentation Module.
+r"""SAM3 Segmentation Module.
 
 Runs SAM3 segmentation on images in a FiftyOne grouped dataset.
 Only processes the "image" slice of the dataset.
