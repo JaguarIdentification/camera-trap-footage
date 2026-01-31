@@ -101,7 +101,7 @@ def export_to_disk(
     logger.info(f"Saved embeddings to {emb_path}")
 
     # Save metadata
-    metadata = {"image_paths": image_paths, "labels": labels, "embedding_shape": embeddings.shape}
+    metadata: dict[str, Any] = {"image_paths": image_paths, "labels": labels, "embedding_shape": list(embeddings.shape)}
 
     if predictions is not None:
         metadata["predictions"] = predictions

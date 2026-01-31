@@ -88,7 +88,7 @@ def write_summary(summary_data: dict[str, Any], summary_location: Path, to_wandb
 
 
 def train_epoch(
-    model: nn.Module, loader: DataLoader, criterion: nn.Module, optimizer: Optimizer, device: str, log_wandb: bool = False
+    model: nn.Module, loader: DataLoader[Any], criterion: nn.Module, optimizer: Optimizer, device: str, log_wandb: bool = False
 ) -> tuple[float, float]:
     """Train for one epoch.
 
@@ -145,7 +145,7 @@ def train_epoch(
     return avg_loss, accuracy
 
 
-def validate_epoch(model: nn.Module, loader: DataLoader, criterion: nn.Module, device: str) -> tuple[float, float]:
+def validate_epoch(model: nn.Module, loader: DataLoader[Any], criterion: nn.Module, device: str) -> tuple[float, float]:
     """Validate for one epoch.
 
     Args:
@@ -281,12 +281,12 @@ def run_processing(
         logger_instance.info(f"Embeddings extracted: {train_embeddings.shape}")
     else:
         logger_instance.info("Using pre-computed embeddings")
-        train_embeddings = train_data.embeddings
-        val_embeddings = val_data.embeddings
+        train_embeddings = train_data.embeddings if train_data.embeddings is not None else np.array([])
+        val_embeddings = val_data.embeddings if val_data.embeddings is not None else np.array([])
 
     # Create datasets and dataloaders
-    train_dataset = EmbeddingDataset(train_embeddings, train_data.labels_encoded)
-    val_dataset = EmbeddingDataset(val_embeddings, val_data.labels_encoded)
+    train_dataset = EmbeddingDataset(train_embeddings.tolist(), train_data.labels_encoded.tolist())
+    val_dataset = EmbeddingDataset(val_embeddings.tolist(), val_data.labels_encoded.tolist())
 
     train_loader = DataLoader(
         train_dataset,
@@ -317,6 +317,7 @@ def run_processing(
     optimizer = torch.optim.AdamW(model.parameters(), lr=config.training.learning_rate, weight_decay=config.training.weight_decay)
 
     # Setup scheduler
+    scheduler: torch.optim.lr_scheduler.ReduceLROnPlateau | torch.optim.lr_scheduler.CosineAnnealingLR | None
     if config.training.scheduler_type == "reduce_on_plateau":
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
             optimizer, mode="min", factor=config.training.scheduler_factor, patience=config.training.scheduler_patience

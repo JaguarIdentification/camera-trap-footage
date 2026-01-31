@@ -173,11 +173,11 @@ def get_default_config() -> ReidentificationConfig:
 def load_config_from_dict(config_dict: dict[str, Any]) -> ReidentificationConfig:
     """Load configuration from dictionary."""
     # Recursively convert nested dicts to dataclasses
-    def _nested_dataclass(cls, data):
+    def _nested_dataclass(cls: type, data: Any) -> Any:
         if not isinstance(data, dict):
             return data
 
-        fieldtypes = {f.name: f.type for f in cls.__dataclass_fields__.values()}
+        fieldtypes = {f.name: f.type for f in cls.__dataclass_fields__.values()}  # type: ignore
         kwargs = {}
         for key, value in data.items():
             if key in fieldtypes:
@@ -189,4 +189,4 @@ def load_config_from_dict(config_dict: dict[str, Any]) -> ReidentificationConfig
                     kwargs[key] = value
         return cls(**kwargs)
 
-    return _nested_dataclass(ReidentificationConfig, config_dict)
+    return _nested_dataclass(ReidentificationConfig, config_dict)  # type: ignore
