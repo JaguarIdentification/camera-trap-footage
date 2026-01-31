@@ -22,6 +22,9 @@ from jaguars.common.config import JID_MASTER_DATASET
 from jaguars.common.logging_utils import setup_logger
 from jaguars.ingestion.loaders.csv_loader import ingest_csv_labels
 from jaguars.ingestion.loaders.pptx_loader import ingest_pptx_slides
+from jaguars.ingestion.processing.sample import run_processing as run_sample
+from jaguars.ingestion.processing.segmentation import run_processing as run_segmentation
+from jaguars.ingestion.processing.add_embeddings import run_processing as run_add_embeddings
 
 logger = setup_logger("ingestion.pipeline")
 
@@ -94,7 +97,7 @@ def run_data_loaders(
     return results
 
 
-def run_processing_pipeline() -> dict[str, Any]:
+def run_processing_pipeline(dataset_name: str, output_dir: Path | None = None) -> dict[str, Any]:
     """Runs processing steps on the ingested dataset.
 
     Returns:
@@ -103,11 +106,26 @@ def run_processing_pipeline() -> dict[str, Any]:
     results: dict[str, Any] = {}
 
     # 1. sample
-    # 2. compute metadata
-    # 3. segmentation
+    logger.info("Running Step 1: Video Sampling")
+    results["sampling"] = run_sample(dataset_name=dataset_name, verbose=True)
+
+    # 2. compute metadata (Assume existing module or skip if not available in this context)
+    # Skipping as file not provided/requested explicitly in detail
+
+    # 3. segmentation (SAM3 + Filtering)
+    logger.info("Running Step 3: Segmentation & Filtering")
+    results["segmentation"] = run_segmentation(
+        dataset_name=dataset_name, segmentation_field="sam3_segmentations", prompt="jaguar", inspect_app=False, verbose=True  # Automated pipeline
+    )
+
     # 4. add embeddings
-    # 5. split
-    # 6. deduplicate
+    logger.info("Running Step 4: Embedding Computation")
+    results["embeddings"] = run_add_embeddings(
+        dataset_name=dataset_name, patches_field="sam3_segmentations", mask_field="mask", verbose=True  # Use the segments  # SAM3 adds masks
+    )
+
+    # 5. split (Skip)
+    # 6. deduplicate (Skip)
 
     return results
 
@@ -166,7 +184,7 @@ def run_ingestion_pipeline(
     else:
         raise ValueError("No dataset was created during ingestion and no existing dataset found with the name: " + dataset_name)
 
-    results["processing"] = run_processing_pipeline()
+    results["processing"] = run_processing_pipeline(dataset_name, export_dir)
 
     if export_dir is not None:
         results["dataset"].export(
