@@ -128,7 +128,7 @@ def compute_cmc(
     
     # Compute similarity matrix
     sim_matrix = cosine_similarity(embeddings)
-    np.fill_diagonal(sim_matrix, -1)  # Exclude self
+    np.fill_diagonal(sim_matrix, -np.inf)  # Exclude self with very negative value
 
     # For each query, get ranking
     cmc_scores = {k: 0.0 for k in top_k}

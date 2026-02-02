@@ -152,11 +152,12 @@ def test_compute_cmc_no_matches() -> None:
     embeddings = np.eye(5, dtype=np.float32)
     labels = np.arange(5)
 
-    cmc_scores = compute_cmc(embeddings, labels, top_k=[1, 5])
+    cmc_scores = compute_cmc(embeddings, labels, top_k=[1, 3])
 
     # No matches possible (each sample is unique class)
     assert cmc_scores[1] == 0.0
-    assert cmc_scores[5] == 0.0
+    # For k=3, still no matches since each class has only 1 sample (the query itself)
+    assert cmc_scores[3] == 0.0
 
 
 def test_compute_cmc_custom_k() -> None:

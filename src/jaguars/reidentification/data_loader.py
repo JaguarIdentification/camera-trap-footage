@@ -318,11 +318,15 @@ def save_metadata(metadata: DatasetMetadata, output_path: Path) -> None:
     """
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
+    # Convert numpy types to native Python types for JSON serialization
+    split_counts = dict(pd.Series(metadata.split).value_counts())
+    split_counts = {k: int(v) for k, v in split_counts.items()}
+
     data = {
         "num_samples": len(metadata),
-        "num_classes": metadata.num_classes,
+        "num_classes": int(metadata.num_classes),
         "classes": metadata.label_encoder.classes_.tolist(),
-        "split_counts": dict(pd.Series(metadata.split).value_counts()),
+        "split_counts": split_counts,
     }
 
     with open(output_path, "w") as f:

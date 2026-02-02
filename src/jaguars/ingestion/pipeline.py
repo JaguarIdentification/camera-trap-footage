@@ -25,6 +25,8 @@ from jaguars.ingestion.loaders.pptx_loader import ingest_pptx_slides
 from jaguars.ingestion.processing.sample import run_processing as run_sample
 from jaguars.ingestion.processing.segmentation import run_processing as run_segmentation
 from jaguars.ingestion.processing.add_embeddings import run_processing as run_add_embeddings
+from jaguars.ingestion.processing.split import run_processing as run_split
+from jaguars.ingestion.processing.deduplicate import run_processing as run_deduplicate
 
 logger = setup_logger("ingestion.pipeline")
 
@@ -97,7 +99,16 @@ def run_data_loaders(
     return results
 
 
-def run_processing_pipeline(dataset_name: str, output_dir: Path | None = None) -> dict[str, Any]:
+def run_processing_pipeline(
+    dataset_name: str,
+    output_dir: Path | None = None,
+    run_split_steps: bool = True,
+    run_deduplication: bool = True,
+    dedup_similarity_threshold: float = 0.95,
+    dedup_compute_similarity_index: bool = False,
+    dedup_detect_leaky_splits: bool = False,
+    split_field: str = "split",
+) -> dict[str, Any]:
     """Runs processing steps on the ingested dataset.
 
     Returns:
@@ -124,8 +135,28 @@ def run_processing_pipeline(dataset_name: str, output_dir: Path | None = None) -
         dataset_name=dataset_name, patches_field="sam3_segmentations", mask_field="mask", verbose=True  # Use the segments  # SAM3 adds masks
     )
 
-    # 5. split (Skip)
-    # 6. deduplicate (Skip)
+    # 5. split
+    if run_split_steps:
+        logger.info("Running Step 5: Dataset Splitting")
+        results["split"] = run_split(
+            dataset_name=dataset_name,
+            add_closed_set=True,
+            add_open_set=False,
+            tag_by="closed",
+            verbose=True,
+        )
+
+    # 6. deduplicate
+    if run_deduplication:
+        logger.info("Running Step 6: Deduplication")
+        results["deduplicate"] = run_deduplicate(
+            dataset_name=dataset_name,
+            similarity_threshold=dedup_similarity_threshold,
+            compute_similarity_index=dedup_compute_similarity_index,
+            detect_leaky_splits=dedup_detect_leaky_splits,
+            split_field=split_field,
+            verbose=True,
+        )
 
     return results
 
@@ -143,6 +174,12 @@ def run_ingestion_pipeline(
     match_threshold: float = 0.95,
     suggest_threshold: float = 0.80,
     overwrite: bool = False,
+    run_split_steps: bool = True,
+    run_deduplication: bool = True,
+    dedup_similarity_threshold: float = 0.95,
+    dedup_compute_similarity_index: bool = False,
+    dedup_detect_leaky_splits: bool = False,
+    split_field: str = "split",
 ) -> dict[str, Any]:
     """Runs ingestion from the specified sources.
 
@@ -158,6 +195,12 @@ def run_ingestion_pipeline(
         match_threshold: Similarity threshold for auto-matching samples during CSV ingestion.
         suggest_threshold: Similarity threshold for suggesting matches during CSV ingestion.
         overwrite: Whether to overwrite existing datasets.
+        run_split_steps: Whether to run dataset splitting.
+        run_deduplication: Whether to run deduplication.
+        dedup_similarity_threshold: Similarity threshold for deduplication.
+        dedup_compute_similarity_index: Compute similarity index for similarity search.
+        dedup_detect_leaky_splits: Detect similar samples across splits.
+        split_field: Field name containing split assignments.
 
     Returns:
         Dict with keys: "images", "videos".
@@ -184,8 +227,14 @@ def run_ingestion_pipeline(
     else:
         raise ValueError("No dataset was created during ingestion and no existing dataset found with the name: " + dataset_name)
 
-    results["processing"] = run_processing_pipeline(dataset_name, export_dir)
-
+    results["processing"] = run_processing_pipeline(
+        dataset_name,
+        export_dir,
+        run_split_steps=run_split_steps,
+        run_deduplication=run_deduplication,
+        dedup_similarity_threshold=dedup_similarity_threshold,
+        split_field=split_field,
+    )
     if export_dir is not None:
         results["dataset"].export(
             export_dir=export_dir.as_posix(),

@@ -3,7 +3,7 @@ requires = ["setuptools"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "jaguar_reidentification"
+name = "jaguars"
 version = "0.1.0"
 description = "Project to reidentify jaguar individuals as part of seminar at HPI."
 readme = "README.md"
@@ -33,7 +33,7 @@ dependencies = [
 package-dir = {"" = "src"}
 
 [tool.setuptools.package-data]
-jaguar_reidentification = ["py.typed"]
+jaguars = ["py.typed"]
 
 
 [tool.setuptools.packages.find]

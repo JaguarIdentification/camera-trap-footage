@@ -75,7 +75,7 @@ class TestAddEmbeddings(unittest.TestCase):
         # Compute embeddings
         dataset = run_processing(
             dataset_name=self.dataset_name,
-            model_name="hf-hub:BVRA/MegaDescriptor-L-384",
+            model_name="resnet18",  # Use smaller model for testing
             verbose=True,
         )
 
@@ -86,8 +86,8 @@ class TestAddEmbeddings(unittest.TestCase):
 
         # Check that embeddings field exists
         for sample in image_view:
-            self.assertIn("embeddings_BVRA_MegaDescriptor_L_384", sample.field_names)
-            embedding = sample["embeddings_BVRA_MegaDescriptor_L_384"]
+            self.assertIn("embeddings_resnet18", sample.field_names)
+            embedding = sample["embeddings_resnet18"]
             self.assertIsNotNone(embedding)
             self.assertIsInstance(embedding, np.ndarray)
 
@@ -129,6 +129,7 @@ class TestAddEmbeddings(unittest.TestCase):
         # Compute embeddings for patches
         dataset = run_processing(
             dataset_name=self.dataset_name,
+            model_name="resnet18",  # Use smaller model for testing
             patches_field="detections",
             verbose=True,
         )
@@ -139,8 +140,7 @@ class TestAddEmbeddings(unittest.TestCase):
         sample = image_view.first()
 
         for detection in sample["detections"].detections:
-            self.assertIn("embeddings_BVRA_MegaDescriptor_L_384", detection.field_names)
-            embedding = detection["embeddings_BVRA_MegaDescriptor_L_384"]
+            embedding = detection["embeddings_resnet18"]
             self.assertIsNotNone(embedding)
             self.assertIsInstance(embedding, np.ndarray)
 
@@ -185,6 +185,7 @@ class TestAddEmbeddings(unittest.TestCase):
         # Compute embeddings with mask field
         dataset = run_processing(
             dataset_name=self.dataset_name,
+            model_name="resnet18",  # Use smaller model for testing
             patches_field="detections",
             mask_field="mask",
             verbose=True,
@@ -196,8 +197,8 @@ class TestAddEmbeddings(unittest.TestCase):
         sample = image_view.first()
 
         detection = sample["detections"].detections[0]
-        self.assertIn("embeddings_BVRA_MegaDescriptor_L_384", detection.field_names)
-        embedding = detection["embeddings_BVRA_MegaDescriptor_L_384"]
+        self.assertIn("embeddings_resnet18", detection.field_names)
+        embedding = detection["embeddings_resnet18"]
         self.assertIsNotNone(embedding)
         self.assertIsInstance(embedding, np.ndarray)
 

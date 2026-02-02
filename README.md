@@ -15,8 +15,9 @@ For a detailed technical overview, see [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ### Prerequisites
 *   Python 3.10+
-*   `uv` (recommended) or `pip`
+*   `uv` (recommended) or `pip` or `conda` for package management.
 *   FFMPEG is required for video processing. Please install it by following the instructions [here](https://ffmpeg.org/download.html).
+    * If you use conda: `conda install -c conda-forge ffmpeg -y`
 *   DVC is used for data versioning. Please install it by following the instructions [here](https://dvc.org/doc/install).
 
 ### Installation

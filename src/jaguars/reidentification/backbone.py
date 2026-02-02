@@ -163,10 +163,12 @@ def get_backbone(config: BackboneConfig, device: str | None = None) -> BackboneI
         device = "cuda" if torch.cuda.is_available() else "cpu"
 
     # Determine backbone type from name
-    if "dinov2" in config.name.lower() or "vit" in config.name.lower():
+    # Support ViT, DINOv2, ResNet, and other timm models via MegaDescriptorBackbone
+    if "dinov2" in config.name.lower() or "vit" in config.name.lower() or "resnet" in config.name.lower() or "efficientnet" in config.name.lower():
         backbone = MegaDescriptorBackbone(config)
     else:
-        raise ValueError(f"Unsupported backbone: {config.name}")
+        # Try to use MegaDescriptorBackbone as fallback for any timm model
+        backbone = MegaDescriptorBackbone(config)
 
     backbone.to(device)
     return backbone

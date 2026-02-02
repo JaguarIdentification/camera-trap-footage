@@ -15,7 +15,7 @@ from fiftyone import ViewField as F
 
 from jaguars.common.config import JID_MASTER_DATASET
 from jaguars.common.logging_utils import setup_logger
-from jaguars.segmentation.sam3 import run_processing as run_sam3
+from jaguars.segmentation.SAM3 import run_processing as run_sam3
 
 MODULE_NAME = "ingestion.processing.segmentation"
 logger = setup_logger(MODULE_NAME)
@@ -187,7 +187,6 @@ def run_processing(
         
     # 5. Cleanup
     logger_instance.info("Cleaning up filtered samples...")
-    # check = dataset.count_sample_tags() # Unused
     total_deleted = cleanup_dataset(dataset, filter_tags)
     
     if summary_location:
