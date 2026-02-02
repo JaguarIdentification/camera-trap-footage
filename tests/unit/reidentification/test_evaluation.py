@@ -2,7 +2,7 @@
 
 import pytest
 import numpy as np
-import torch
+from numpy.typing import NDArray
 
 from jaguars.reidentification.config import ModelConfig
 from jaguars.reidentification.model import ArcFaceModel
@@ -14,7 +14,7 @@ from sklearn.preprocessing import LabelEncoder
 
 
 @pytest.fixture
-def sample_model():
+def sample_model() -> ArcFaceModel:
     """Create a simple model for testing."""
     config = ModelConfig(embedding_dim=64, hidden_dim=128)
     model = ArcFaceModel(input_dim=128, num_classes=5, config=config)
@@ -23,7 +23,7 @@ def sample_model():
 
 
 @pytest.fixture
-def sample_embeddings():
+def sample_embeddings() -> tuple[NDArray[np.float32], NDArray[np.int_], LabelEncoder]:
     """Create sample embeddings and labels."""
     np.random.seed(42)
 
@@ -48,7 +48,7 @@ def sample_embeddings():
     return embeddings, labels, label_encoder
 
 
-def test_compute_validation_map(sample_model, sample_embeddings):
+def test_compute_validation_map(sample_model: ArcFaceModel, sample_embeddings: tuple[NDArray[np.float32], NDArray[np.int_], LabelEncoder]) -> None:
     """Test computing mean Average Precision."""
     embeddings, labels, label_encoder = sample_embeddings
 
@@ -61,15 +61,15 @@ def test_compute_validation_map(sample_model, sample_embeddings):
     assert not np.isnan(map_score)
 
 
-def test_compute_validation_map_perfect_separation():
+def test_compute_validation_map_perfect_separation() -> None:
     """Test mAP with perfectly separated classes."""
     # Create perfectly separated embeddings
     num_classes = 3
     samples_per_class = 4
     embedding_dim = 64
 
-    embeddings = []
-    labels = []
+    embeddings_list = []
+    labels_list = []
 
     for class_id in range(num_classes):
         # Each class has embeddings in a different region
@@ -78,11 +78,11 @@ def test_compute_validation_map_perfect_separation():
 
         for _ in range(samples_per_class):
             emb = class_center + np.random.randn(embedding_dim) * 0.1
-            embeddings.append(emb)
-            labels.append(class_id)
+            embeddings_list.append(emb)
+            labels_list.append(class_id)
 
-    embeddings = np.array(embeddings, dtype=np.float32)
-    labels = np.array(labels)
+    embeddings = np.array(embeddings_list, dtype=np.float32)
+    labels = np.array(labels_list)
 
     label_encoder = LabelEncoder()
     label_encoder.fit(labels)
@@ -97,7 +97,7 @@ def test_compute_validation_map_perfect_separation():
     assert map_score > 0.5
 
 
-def test_compute_cmc_basic():
+def test_compute_cmc_basic() -> None:
     """Test CMC computation with simple embeddings."""
     # Create simple embeddings where classes are separated
     embeddings = np.array(
@@ -124,7 +124,7 @@ def test_compute_cmc_basic():
     assert cmc_scores[1] <= cmc_scores[2] <= cmc_scores[3]
 
 
-def test_compute_cmc_perfect_retrieval():
+def test_compute_cmc_perfect_retrieval() -> None:
     """Test CMC with perfect retrieval."""
     # Each query's nearest neighbor is from the same class
     embeddings = np.array(
@@ -146,7 +146,7 @@ def test_compute_cmc_perfect_retrieval():
     assert cmc_scores[2] == 1.0
 
 
-def test_compute_cmc_no_matches():
+def test_compute_cmc_no_matches() -> None:
     """Test CMC when no matches exist."""
     # Each sample is unique
     embeddings = np.eye(5, dtype=np.float32)
@@ -159,7 +159,7 @@ def test_compute_cmc_no_matches():
     assert cmc_scores[5] == 0.0
 
 
-def test_compute_cmc_custom_k():
+def test_compute_cmc_custom_k() -> None:
     """Test CMC with custom top-k values."""
     embeddings = np.random.randn(10, 32).astype(np.float32)
     labels = np.array([0, 0, 1, 1, 2, 2, 3, 3, 4, 4])
@@ -170,7 +170,7 @@ def test_compute_cmc_custom_k():
     assert set(cmc_scores.keys()) == set(top_k)
 
 
-def test_validation_map_single_class():
+def test_validation_map_single_class() -> None:
     """Test mAP with only one class."""
     embeddings = np.random.randn(5, 64).astype(np.float32)
     labels = np.zeros(5, dtype=int)  # All same class
@@ -189,7 +189,7 @@ def test_validation_map_single_class():
     assert not np.isnan(map_score)
 
 
-def test_validation_map_consistency():
+def test_validation_map_consistency() -> None:
     """Test that mAP is consistent across runs."""
     np.random.seed(123)
     embeddings = np.random.randn(10, 64).astype(np.float32)
