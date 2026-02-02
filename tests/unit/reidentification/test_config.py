@@ -16,7 +16,7 @@ from jaguars.reidentification.config import (
 )
 
 
-def test_backbone_config_defaults():
+def test_backbone_config_defaults() -> None:
     """Test BackboneConfig with default values."""
     config = BackboneConfig()
     assert config.name == "vit_large_patch14_dinov2.lvd142m"
@@ -26,7 +26,7 @@ def test_backbone_config_defaults():
     assert config.embedding_dim == 1536
 
 
-def test_model_config_defaults():
+def test_model_config_defaults() -> None:
     """Test ModelConfig with default values."""
     config = ModelConfig()
     assert config.hidden_dim == 512
@@ -36,7 +36,7 @@ def test_model_config_defaults():
     assert config.arcface_scale == 64.0
 
 
-def test_dataset_config_defaults():
+def test_dataset_config_defaults() -> None:
     """Test DatasetConfig with default values."""
     config = DatasetConfig()
     assert config.source == "fiftyone"
@@ -45,7 +45,7 @@ def test_dataset_config_defaults():
     assert config.pin_memory is False
 
 
-def test_training_config_defaults():
+def test_training_config_defaults() -> None:
     """Test TrainingConfig with default values."""
     config = TrainingConfig()
     assert config.learning_rate == 1e-4
@@ -55,7 +55,7 @@ def test_training_config_defaults():
     assert config.save_dir == Path("data/models/reidentification")
 
 
-def test_evaluation_config_defaults():
+def test_evaluation_config_defaults() -> None:
     """Test EvaluationConfig with default values."""
     config = EvaluationConfig()
     assert config.compute_map is True
@@ -64,7 +64,7 @@ def test_evaluation_config_defaults():
     assert config.add_to_fiftyone is False
 
 
-def test_wandb_config_defaults():
+def test_wandb_config_defaults() -> None:
     """Test WandbConfig with default values."""
     config = WandbConfig()
     assert config.enabled is True
@@ -72,7 +72,7 @@ def test_wandb_config_defaults():
     assert config.log_frequency == 10
 
 
-def test_reidentification_config_defaults():
+def test_reidentification_config_defaults() -> None:
     """Test complete ReidentificationConfig."""
     config = ReidentificationConfig()
     assert isinstance(config.backbone, BackboneConfig)
@@ -85,14 +85,14 @@ def test_reidentification_config_defaults():
     assert config.verbose is False
 
 
-def test_get_default_config():
+def test_get_default_config() -> None:
     """Test get_default_config function."""
     config = get_default_config()
     assert isinstance(config, ReidentificationConfig)
     assert config.backbone.name == "vit_large_patch14_dinov2.lvd142m"
 
 
-def test_load_config_from_dict():
+def test_load_config_from_dict() -> None:
     """Test loading config from dictionary."""
     config_dict = {
         "backbone": {"name": "custom_backbone", "embedding_dim": 2048},
@@ -111,7 +111,7 @@ def test_load_config_from_dict():
     assert config.seed == 123
 
 
-def test_config_post_init():
+def test_config_post_init() -> None:
     """Test configuration post-initialization path creation."""
     config = ReidentificationConfig()
     # Directories should be created
@@ -119,7 +119,7 @@ def test_config_post_init():
     assert config.evaluation.output_dir.exists()
 
 
-def test_config_custom_paths():
+def test_config_custom_paths() -> None:
     """Test configuration with custom paths."""
     config = ReidentificationConfig()
     config.training.save_dir = Path("custom/models")

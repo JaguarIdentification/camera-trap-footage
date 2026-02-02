@@ -28,7 +28,7 @@ def ensure_dir(path: str | Path) -> Path:
     return path
 
 
-def list_files(directory: Path, extensions: set | None = None) -> list[Path]:
+def list_files(directory: Path, extensions: set[str] | None = None) -> list[Path]:
     """Lists files in a directory, optionally filtering by extension."""
     directory = validate_dir_exists(directory)
     files = [f for f in directory.rglob("*") if f.is_file()]

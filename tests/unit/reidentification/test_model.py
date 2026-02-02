@@ -2,7 +2,6 @@
 
 import pytest
 import torch
-import numpy as np
 
 from jaguars.reidentification.config import ModelConfig
 from jaguars.reidentification.model import (
@@ -14,7 +13,7 @@ from jaguars.reidentification.model import (
 
 
 @pytest.fixture
-def model_config():
+def model_config() -> ModelConfig:
     """Create a model configuration for testing."""
     return ModelConfig(
         hidden_dim=128,
@@ -25,7 +24,7 @@ def model_config():
     )
 
 
-def test_embedding_projection():
+def test_embedding_projection() -> None:
     """Test EmbeddingProjection module."""
     input_dim = 512
     hidden_dim = 256
@@ -44,7 +43,7 @@ def test_embedding_projection():
     assert not torch.isnan(output).any()
 
 
-def test_arcface_layer():
+def test_arcface_layer() -> None:
     """Test ArcFaceLayer."""
     embedding_dim = 128
     num_classes = 10
@@ -65,7 +64,7 @@ def test_arcface_layer():
     assert not torch.isnan(logits).any()
 
 
-def test_arcface_layer_normalization():
+def test_arcface_layer_normalization() -> None:
     """Test that ArcFace normalizes embeddings."""
     embedding_dim = 64
     num_classes = 5
@@ -84,7 +83,7 @@ def test_arcface_layer_normalization():
     assert not torch.isnan(logits).any()
 
 
-def test_arcface_model(model_config):
+def test_arcface_model(model_config: ModelConfig) -> None:
     """Test complete ArcFaceModel."""
     input_dim = 512
     num_classes = 20
@@ -104,7 +103,7 @@ def test_arcface_model(model_config):
     assert not torch.isnan(embeddings).any()
 
 
-def test_arcface_model_get_embeddings(model_config):
+def test_arcface_model_get_embeddings(model_config: ModelConfig) -> None:
     """Test getting normalized embeddings."""
     input_dim = 512
     num_classes = 10
@@ -122,7 +121,7 @@ def test_arcface_model_get_embeddings(model_config):
     assert torch.allclose(norms, torch.ones_like(norms), atol=1e-5)
 
 
-def test_build_model(model_config):
+def test_build_model(model_config: ModelConfig) -> None:
     """Test model factory function."""
     input_dim = 1536
     num_classes = 50
@@ -141,7 +140,7 @@ def test_build_model(model_config):
     assert logits.shape == (2, num_classes)
 
 
-def test_model_training_mode():
+def test_model_training_mode() -> None:
     """Test model in training mode."""
     config = ModelConfig()
     model = ArcFaceModel(input_dim=512, num_classes=10, config=config)
@@ -162,7 +161,7 @@ def test_model_training_mode():
     assert not torch.isnan(logits2).any()
 
 
-def test_model_eval_mode():
+def test_model_eval_mode() -> None:
     """Test model in evaluation mode."""
     config = ModelConfig()
     model = ArcFaceModel(input_dim=512, num_classes=10, config=config)
@@ -180,7 +179,7 @@ def test_model_eval_mode():
     assert torch.allclose(emb1, emb2)
 
 
-def test_model_gradient_flow():
+def test_model_gradient_flow() -> None:
     """Test that gradients flow through the model."""
     config = ModelConfig()
     model = ArcFaceModel(input_dim=512, num_classes=10, config=config)

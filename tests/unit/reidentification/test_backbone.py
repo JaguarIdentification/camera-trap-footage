@@ -6,6 +6,7 @@ import numpy as np
 from pathlib import Path
 from PIL import Image
 import tempfile
+from collections.abc import Iterator
 
 from jaguars.reidentification.config import BackboneConfig
 from jaguars.reidentification.backbone import (
@@ -16,7 +17,7 @@ from jaguars.reidentification.backbone import (
 
 
 @pytest.fixture
-def backbone_config():
+def backbone_config() -> BackboneConfig:
     """Create backbone configuration for testing."""
     return BackboneConfig(
         name="vit_large_patch14_dinov2.lvd142m",
@@ -28,7 +29,7 @@ def backbone_config():
 
 
 @pytest.fixture
-def sample_images():
+def sample_images() -> Iterator[list[str]]:
     """Create temporary sample images for testing."""
     temp_dir = tempfile.mkdtemp()
     image_paths = []
@@ -47,7 +48,7 @@ def sample_images():
     Path(temp_dir).rmdir()
 
 
-def test_megadescriptor_backbone_init(backbone_config):
+def test_megadescriptor_backbone_init(backbone_config: BackboneConfig) -> None:
     """Test MegaDescriptorBackbone initialization."""
     backbone = MegaDescriptorBackbone(backbone_config)
 
@@ -56,7 +57,7 @@ def test_megadescriptor_backbone_init(backbone_config):
     assert backbone.config.embedding_dim == 1536
 
 
-def test_megadescriptor_forward(backbone_config):
+def test_megadescriptor_forward(backbone_config: BackboneConfig) -> None:
     """Test forward pass through backbone."""
     backbone = MegaDescriptorBackbone(backbone_config)
     backbone.eval()
@@ -71,7 +72,7 @@ def test_megadescriptor_forward(backbone_config):
     assert not torch.isnan(output).any()
 
 
-def test_megadescriptor_preprocessing(backbone_config):
+def test_megadescriptor_preprocessing(backbone_config: BackboneConfig) -> None:
     """Test preprocessing pipeline."""
     backbone = MegaDescriptorBackbone(backbone_config)
     preprocess = backbone.get_preprocess()
@@ -86,7 +87,7 @@ def test_megadescriptor_preprocessing(backbone_config):
     assert tensor.dtype == torch.float32
 
 
-def test_backbone_get_embedding_dim(backbone_config):
+def test_backbone_get_embedding_dim(backbone_config: BackboneConfig) -> None:
     """Test getting embedding dimension."""
     backbone = MegaDescriptorBackbone(backbone_config)
     dim = backbone.get_embedding_dim()
@@ -95,7 +96,7 @@ def test_backbone_get_embedding_dim(backbone_config):
 
 
 @pytest.mark.slow
-def test_extract_embeddings(backbone_config, sample_images):
+def test_extract_embeddings(backbone_config: BackboneConfig, sample_images: list[str]) -> None:
     """Test extracting embeddings from image paths."""
     backbone = MegaDescriptorBackbone(backbone_config)
     backbone.eval()
@@ -106,7 +107,7 @@ def test_extract_embeddings(backbone_config, sample_images):
     assert not np.isnan(embeddings).any()
 
 
-def test_get_backbone_factory(backbone_config):
+def test_get_backbone_factory(backbone_config: BackboneConfig) -> None:
     """Test backbone factory function."""
     backbone = get_backbone(backbone_config, device="cpu")
 
@@ -114,7 +115,7 @@ def test_get_backbone_factory(backbone_config):
     assert backbone.config.name == backbone_config.name
 
 
-def test_get_backbone_unsupported_type():
+def test_get_backbone_unsupported_type() -> None:
     """Test factory with unsupported backbone type."""
     config = BackboneConfig(name="unsupported_backbone")
 
@@ -122,7 +123,7 @@ def test_get_backbone_unsupported_type():
         get_backbone(config)
 
 
-def test_backbone_consistency(backbone_config):
+def test_backbone_consistency(backbone_config: BackboneConfig) -> None:
     """Test that backbone produces consistent outputs in eval mode."""
     backbone = MegaDescriptorBackbone(backbone_config)
     backbone.eval()
@@ -137,7 +138,7 @@ def test_backbone_consistency(backbone_config):
     assert torch.allclose(output1, output2)
 
 
-def test_backbone_batch_sizes(backbone_config):
+def test_backbone_batch_sizes(backbone_config: BackboneConfig) -> None:
     """Test backbone with different batch sizes."""
     backbone = MegaDescriptorBackbone(backbone_config)
     backbone.eval()
@@ -151,7 +152,7 @@ def test_backbone_batch_sizes(backbone_config):
         assert output.shape == (batch_size, backbone_config.embedding_dim)
 
 
-def test_backbone_device_cpu(backbone_config):
+def test_backbone_device_cpu(backbone_config: BackboneConfig) -> None:
     """Test backbone on CPU."""
     backbone = get_backbone(backbone_config, device="cpu")
 
@@ -165,7 +166,7 @@ def test_backbone_device_cpu(backbone_config):
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
-def test_backbone_device_cuda(backbone_config):
+def test_backbone_device_cuda(backbone_config: BackboneConfig) -> None:
     """Test backbone on CUDA."""
     backbone = get_backbone(backbone_config, device="cuda")
 

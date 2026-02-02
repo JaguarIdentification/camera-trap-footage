@@ -5,6 +5,7 @@ import numpy as np
 from pathlib import Path
 import tempfile
 from PIL import Image
+from collections.abc import Iterator
 
 from jaguars.reidentification.config import DatasetConfig
 from jaguars.reidentification.data_loader import (
@@ -16,7 +17,7 @@ from jaguars.reidentification.data_loader import (
 
 
 @pytest.fixture
-def sample_disk_dataset():
+def sample_disk_dataset() -> Iterator[Path]:
     """Create a temporary disk-based dataset."""
     temp_dir = tempfile.mkdtemp()
     data_dir = Path(temp_dir)
@@ -41,7 +42,7 @@ def sample_disk_dataset():
     shutil.rmtree(temp_dir)
 
 
-def test_dataset_metadata_init():
+def test_dataset_metadata_init() -> None:
     """Test DatasetMetadata initialization."""
     image_paths = ["img1.jpg", "img2.jpg", "img3.jpg"]
     labels = ["cat", "dog", "cat"]
@@ -54,7 +55,7 @@ def test_dataset_metadata_init():
     assert len(metadata.labels_encoded) == 3
 
 
-def test_dataset_metadata_with_embeddings():
+def test_dataset_metadata_with_embeddings() -> None:
     """Test DatasetMetadata with embeddings."""
     image_paths = ["img1.jpg", "img2.jpg"]
     labels = ["class_a", "class_a"]
@@ -68,7 +69,7 @@ def test_dataset_metadata_with_embeddings():
     assert metadata.embeddings.shape == (2, 128)
 
 
-def test_dataset_metadata_with_splits():
+def test_dataset_metadata_with_splits() -> None:
     """Test DatasetMetadata with split information."""
     image_paths = ["img1.jpg", "img2.jpg", "img3.jpg"]
     labels = ["a", "b", "a"]
@@ -81,7 +82,7 @@ def test_dataset_metadata_with_splits():
     assert metadata.split == splits
 
 
-def test_dataset_metadata_get_split():
+def test_dataset_metadata_get_split() -> None:
     """Test getting a specific split from metadata."""
     image_paths = ["img1.jpg", "img2.jpg", "img3.jpg", "img4.jpg"]
     labels = ["a", "b", "a", "b"]
@@ -97,11 +98,12 @@ def test_dataset_metadata_get_split():
     assert len(train_metadata) == 2
     assert train_metadata.image_paths == ["img1.jpg", "img2.jpg"]
     assert train_metadata.labels == ["a", "b"]
+    assert train_metadata.embeddings is not None
     assert train_metadata.embeddings.shape == (2, 64)
     assert train_metadata.num_classes == metadata.num_classes  # Should share label encoder
 
 
-def test_load_from_disk(sample_disk_dataset):
+def test_load_from_disk(sample_disk_dataset: Path) -> None:
     """Test loading dataset from disk."""
     config = DatasetConfig(
         source="disk",
@@ -118,7 +120,7 @@ def test_load_from_disk(sample_disk_dataset):
     assert set(metadata.split) == {"train", "val", "test"}
 
 
-def test_load_from_disk_missing_dir():
+def test_load_from_disk_missing_dir() -> None:
     """Test loading from non-existent directory."""
     config = DatasetConfig(source="disk", data_dir=Path("/nonexistent/path"))
 
@@ -127,7 +129,7 @@ def test_load_from_disk_missing_dir():
     assert len(metadata) == 0
 
 
-def test_load_from_disk_no_data_dir():
+def test_load_from_disk_no_data_dir() -> None:
     """Test that missing data_dir raises error."""
     config = DatasetConfig(source="disk", data_dir=None)
 
@@ -135,7 +137,7 @@ def test_load_from_disk_no_data_dir():
         load_from_disk(config)
 
 
-def test_load_dataset_disk(sample_disk_dataset):
+def test_load_dataset_disk(sample_disk_dataset: Path) -> None:
     """Test load_dataset with disk source."""
     config = DatasetConfig(source="disk", data_dir=sample_disk_dataset)
 
@@ -145,7 +147,7 @@ def test_load_dataset_disk(sample_disk_dataset):
     assert len(metadata) > 0
 
 
-def test_load_dataset_unsupported_source():
+def test_load_dataset_unsupported_source() -> None:
     """Test load_dataset with unsupported source."""
     config = DatasetConfig(source="unsupported")  # type: ignore
 
@@ -153,7 +155,7 @@ def test_load_dataset_unsupported_source():
         load_dataset(config)
 
 
-def test_save_metadata():
+def test_save_metadata() -> None:
     """Test saving metadata to JSON."""
     temp_dir = tempfile.mkdtemp()
     output_path = Path(temp_dir) / "metadata.json"
@@ -181,7 +183,7 @@ def test_save_metadata():
     Path(temp_dir).rmdir()
 
 
-def test_dataset_metadata_label_encoding():
+def test_dataset_metadata_label_encoding() -> None:
     """Test that labels are properly encoded."""
     image_paths = ["img1.jpg", "img2.jpg", "img3.jpg"]
     labels = ["jaguar_a", "jaguar_b", "jaguar_a"]
@@ -197,7 +199,7 @@ def test_dataset_metadata_label_encoding():
     assert list(decoded) == labels
 
 
-def test_dataset_metadata_empty():
+def test_dataset_metadata_empty() -> None:
     """Test DatasetMetadata with empty data."""
     metadata = DatasetMetadata(image_paths=[], labels=[])
 

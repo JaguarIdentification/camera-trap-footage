@@ -3,7 +3,7 @@ import sys
 from pathlib import Path
 import argparse
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, Iterator, Generator
 
 # /Users/mehdisaurus/Documents/1Drittes/CV/jaguar project/camera-trap-footage/src/fiftyone/sample.py
 """
@@ -23,7 +23,7 @@ except Exception:
 VIDEO_EXTS = {".mp4", ".mov", ".avi", ".mkv", ".MPG", ".mpg", ".MP4"}
 
 
-def find_videos(root: Path):
+def find_videos(root: Path) -> Generator[Path, None, None]:
     print(f"Searching for videos in: {root}")
     for p in root.rglob("*"):
         if p.is_file() and p.suffix.lower() in VIDEO_EXTS:
@@ -38,7 +38,7 @@ class Config:
     fmt: str
 
 
-def parse_args(argv: Optional[list] = None) -> Config:
+def parse_args(argv: Optional[list[str]] = None) -> Config:
     parser = argparse.ArgumentParser(description="Sample screenshots from videos using fiftyone.utils.video")
     parser.add_argument(
         "--input",
@@ -70,35 +70,35 @@ def parse_args(argv: Optional[list] = None) -> Config:
     return Config(input=args.input, output=args.output, fps=args.fps, fmt=args.format)
 
 
-def sample_videos_with_fiftyone(videos: list, output_dir: Path, fps: float, fmt: str = "jpg"):
+def sample_videos_with_fiftyone(videos: list[Path], output_dir: Path, fps: float, fmt: str = "jpg") -> None:
     """Sample videos using FiftyOne's sample_videos function"""
     if fo is None or fouv is None:
         raise RuntimeError("FiftyOne is not available")
-    
+
     if not hasattr(fouv, "sample_videos"):
         raise RuntimeError("fiftyone.utils.video.sample_videos is not available")
-    
+
     # Create a temporary FiftyOne dataset from the video files
     samples = []
     for video_path in videos:
         sample = fo.Sample(filepath=str(video_path))
         samples.append(sample)
-    
+
     # Create a temporary dataset with unique name
     import time
     dataset_name = f"temp_video_sampling_{int(time.time())}"
-    
+
     # Delete if exists
     if dataset_name in fo.list_datasets():
         fo.delete_dataset(dataset_name)
-    
+
     dataset = fo.Dataset(dataset_name)
     dataset.add_samples(samples)
-    
+
     try:
         # Use sample_videos to extract frames
         frames_patt = f"%06d.{fmt}"
-        
+
         # Handle fps=0 case (extract only first frame)
         if fps == 0:
             sample_fps = None
@@ -106,7 +106,7 @@ def sample_videos_with_fiftyone(videos: list, output_dir: Path, fps: float, fmt:
         else:
             sample_fps = fps
             frames = None
-        
+
         fouv.sample_videos(
             dataset,
             frames_patt=frames_patt,
@@ -116,43 +116,43 @@ def sample_videos_with_fiftyone(videos: list, output_dir: Path, fps: float, fmt:
             skip_failures=True,
             verbose=True
         )
-        
+
     finally:
         # Clean up the temporary dataset
         dataset.delete()
 
 
-def cleanup_frames(output_dir: Path):
+def cleanup_frames(output_dir: Path) -> None:
 
     total_deleted = 0
     for video_dir in output_dir.iterdir():
         if not video_dir.is_dir():
             continue
-        
+
         # Get all frame files
         frames = sorted(video_dir.glob("*.jpg")) + sorted(video_dir.glob("*.png"))
-        
+
         for frame_path in frames:
             # Extract frame number from filename (e.g., 000006.jpg -> 6)
             try:
                 frame_num = int(frame_path.stem)
             except ValueError:
                 continue
-            
+
             # Frame numbers correspond to seconds (since we sample at 1 fps)
             # Keep frames 1-5 (0-4 seconds)
             if frame_num <= 5:
                 continue
-            
+
             # After frame 5, keep only frames at 10, 15, 20, 25... (every 5 seconds)
             if (frame_num - 5) % 5 != 0:
                 frame_path.unlink()
                 total_deleted += 1
-    
+
     print(f"Deleted {total_deleted} frames")
 
 
-def main():
+def main() -> None:
     config = parse_args()
 
     if not config.input.exists():
@@ -171,10 +171,10 @@ def main():
 
     try:
         sample_videos_with_fiftyone(videos, config.output, config.fps, config.fmt)
-        
+
         # Clean up unwanted frames
         cleanup_frames(config.output)
-        
+
         print("Done.")
     except Exception as e:
         print(f"Video sampling failed: {e}", file=sys.stderr)
