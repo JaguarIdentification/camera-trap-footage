@@ -20,8 +20,8 @@ from typing import Any
 
 import fiftyone as fo
 import fiftyone.zoo as foz
-from fiftyone import ViewField as F
 import torch
+from fiftyone import ViewField as F
 
 from jaguars.common.config import JID_MASTER_DATASET
 from jaguars.common.fiftyone_utils import get_or_create_dataset

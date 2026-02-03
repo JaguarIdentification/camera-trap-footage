@@ -56,14 +56,14 @@ def _compute_embeddings(
     batch_size: int = 32,
 ) -> None:
     """Compute embeddings if they don't exist.
-    
+
     Uses batching to avoid memory issues with large datasets.
     """
     if embeddings_field not in dataset.get_field_schema():
         logger.info("Computing embeddings with model '%s' (batch_size=%d)", model_name, batch_size)
         model = foz.load_zoo_model(model_name)
         dataset.compute_embeddings(
-            model, 
+            model,
             embeddings_field=embeddings_field,
             batch_size=batch_size,  # Process in batches to reduce memory
         )
@@ -80,7 +80,7 @@ def _unmark_all_duplicates(
 ) -> None:
     """Clear all duplicate markings before reprocessing."""
     logger.info("Clearing previous duplicate markings...")
-    
+
     # Clear fields
     if is_duplicate_field in dataset.get_field_schema():
         dataset.set_values(is_duplicate_field, [False] * len(dataset))
@@ -88,12 +88,12 @@ def _unmark_all_duplicates(
         dataset.set_values(duplicate_of_field, [None] * len(dataset))
     if duplicate_similarity_field in dataset.get_field_schema():
         dataset.set_values(duplicate_similarity_field, [None] * len(dataset))
-    
+
     # Remove duplicate tag
     for sample in dataset.match_tags(duplicate_tag):
         sample.tags = [tag for tag in sample.tags if tag != duplicate_tag]
         sample.save()
-    
+
     logger.info("Previous duplicate markings cleared")
 
 
@@ -176,9 +176,9 @@ def run_processing(
             # Sanitize model name for field
             sanitized_model = model_name.split(":")[-1].replace("/", "_").replace("-", "_")
             embeddings_field = f"embeddings_{sanitized_model}"
-    
+
     logger_instance.info("Using embeddings field: %s", embeddings_field)
-    
+
     # Compute embeddings if they don't exist
     if embeddings_field not in dataset.get_field_schema():
         logger_instance.info("Computing embeddings with model '%s'", model_name)
@@ -198,25 +198,25 @@ def run_processing(
             # Get embeddings and compute similarity manually
             import numpy as np
             from sklearn.metrics.pairwise import cosine_similarity
-            
+
             sample_ids = view.values("id")
             embeddings_list = view.values(embeddings_field)
-            
+
             if not embeddings_list or len(embeddings_list) == 0:
                 logger_instance.warning("No embeddings found")
                 brain_results["near_duplicates_found"] = 0
             else:
                 # Convert to numpy array, handling None values
                 embeddings_array = np.array([e for e in embeddings_list if e is not None])
-                
+
                 if len(embeddings_array) > 0:
                     # Compute similarity matrix
                     sim_matrix = cosine_similarity(embeddings_array)
-                    
+
                     # Find duplicate pairs
                     duplicates_marked = 0
                     marked_as_dup = set()
-                    
+
                     for i in range(len(sample_ids)):
                         if sample_ids[i] in marked_as_dup:
                             continue
@@ -234,10 +234,9 @@ def run_processing(
                                 marked_as_dup.add(sample_ids[j])
                                 duplicates_marked += 1
                                 logger_instance.debug(
-                                    "Marked %s as duplicate of %s (similarity=%.4f)",
-                                    sample_ids[j], sample_ids[i], sim_matrix[i, j]
+                                    "Marked %s as duplicate of %s (similarity=%.4f)", sample_ids[j], sample_ids[i], sim_matrix[i, j]
                                 )
-                    
+
                     if duplicates_marked > 0:
                         logger_instance.info("Found %d duplicate pairs", duplicates_marked)
                     else:
@@ -245,7 +244,7 @@ def run_processing(
                     brain_results["near_duplicates_found"] = duplicates_marked
                 else:
                     brain_results["near_duplicates_found"] = 0
-                    
+
         except Exception as exc:
             logger_instance.warning("Failed to compute near duplicates: %s", exc)
             brain_results["near_duplicates_found"] = None
@@ -266,7 +265,7 @@ def run_processing(
             except Exception as exc:
                 logger_instance.warning("Failed to compute similarity index: %s", exc)
                 brain_results["similarity_index"] = None
-        
+
         # Detect leaky splits
         if detect_leaky_splits and split_field in dataset.get_field_schema():
             try:

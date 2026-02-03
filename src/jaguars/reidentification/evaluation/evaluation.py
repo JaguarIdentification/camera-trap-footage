@@ -33,43 +33,69 @@ MODULE_NAME = "reidentification.evaluation"
 logger = setup_logger(MODULE_NAME)
 
 
-def compute_validation_map(
-    model: ArcFaceModel, val_embeddings: np.ndarray, val_labels: np.ndarray, label_encoder: LabelEncoder, device: str | None = None
-) -> float:
-    """Compute identity-balanced mean Average Precision on validation set.
+def compute_comprehensive_metrics(
+    model: ArcFaceModel | None,
+    val_embeddings: np.ndarray,
+    val_labels: np.ndarray,
+    train_labels: np.ndarray | None,
+    label_encoder: LabelEncoder,
+    device: str | None = None,
+    max_cmc_rank: int = 50,
+    min_train_samples: int | None = None,
+    min_val_samples: int | None = None,
+    use_embeddings_directly: bool = False,
+) -> dict[str, Any]:
+    """Compute comprehensive evaluation metrics efficiently.
 
-    This simulates the competition metric:
-    1. For each query, rank all other images by cosine similarity
-    2. Compute Average Precision based on where true matches appear
-    3. Average APs within each identity, then average across identities
+    Computes similarity matrix once, then derives:
+    - Sample-level mAP (micro-average)
+    - Identity-balanced mAP (macro-average across identities)
+    - Closed-set mAP (identities with sufficient samples in train and val)
+    - CMC curve (Cumulative Matching Characteristics)
+    - CMC@k metrics (k=1,5,10,20)
+    - Training-sample-stratified mAP (mAP by number of training samples)
 
     Args:
-        model: Trained model
+        model: Trained model (can be None if use_embeddings_directly=True)
         val_embeddings: Validation embeddings (num_samples, embedding_dim)
         val_labels: Validation labels (num_samples,)
+        train_labels: Training labels (for stratification), or None
         label_encoder: Label encoder
         device: Device to run on
+        max_cmc_rank: Maximum rank for CMC curve
+        min_train_samples: Minimum training samples for closed-set evaluation (None = no filter)
+        min_val_samples: Minimum validation samples for closed-set evaluation (None = no filter)
+        use_embeddings_directly: If True, use val_embeddings directly without passing through model
 
     Returns:
-        Mean average precision
+        Dictionary with all metrics
     """
     if device is None:
         device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    model.eval()
+    if use_embeddings_directly:
+        # Use embeddings directly (for baselines with pre-computed embeddings)
+        finetuned_emb = val_embeddings
+    else:
+        # Pass through model (for trained models)
+        if model is None:
+            raise ValueError("model must be provided when use_embeddings_directly=False")
+        model.eval()
+        with torch.no_grad():
+            # Get fine-tuned embeddings
+            val_tensor = torch.FloatTensor(val_embeddings).to(device)
+            finetuned_emb = model.get_embeddings(val_tensor).cpu().numpy()
 
-    with torch.no_grad():
-        # Get fine-tuned embeddings
-        val_tensor = torch.FloatTensor(val_embeddings).to(device)
-        finetuned_emb = model.get_embeddings(val_tensor).cpu().numpy()
-
-    # Compute cosine similarity matrix
+    # Compute cosine similarity matrix ONCE
     sim_matrix = cosine_similarity(finetuned_emb)
     np.fill_diagonal(sim_matrix, -1)  # Exclude self-similarity
 
-    # Compute AP for each query
-    query_aps = {}
+    # Initialize metric accumulators
+    query_aps = {}  # query_idx -> (label, ap)
+    cmc_hits = np.zeros(max_cmc_rank)  # Count of queries where match is in top-k
+    num_queries = 0
 
+    # Compute metrics for each query
     for query_idx in range(len(val_labels)):
         query_label = val_labels[query_idx]
 
@@ -96,23 +122,194 @@ def compute_validation_map(
 
         query_aps[query_idx] = (query_label, ap)
 
-    # Group by identity and compute identity-balanced mAP
+        # Update CMC: find first correct match
+        first_match_idx = np.where(sorted_matches)[0]
+        if len(first_match_idx) > 0:
+            first_match_rank = first_match_idx[0]
+            # Mark all ranks >= first_match_rank as hits
+            cmc_hits[first_match_rank:] += 1
+        num_queries += 1
+
+    # 1. Sample-level mAP (micro-average)
+    sample_map = float(np.mean([ap for _, ap in query_aps.values()]))
+
+    # 2. Identity-balanced mAP (macro-average across identities)
     identity_aps: dict[int, list[float]] = {}
     for _query_idx, (label, ap) in query_aps.items():
         if label not in identity_aps:
             identity_aps[label] = []
         identity_aps[label].append(ap)
 
-    # Average within identity, then across identities
     identity_mean_aps = [np.mean(aps) for aps in identity_aps.values()]
-    balanced_map = np.mean(identity_mean_aps)
+    identity_balanced_map = float(np.mean(identity_mean_aps))
 
-    return float(balanced_map)
+    # 2b. Closed-set mAP (filter to identities with sufficient samples)
+    closed_set_map = None
+    closed_set_identities = []
+    if min_train_samples is not None or min_val_samples is not None:
+        # Count samples per identity in train and val
+        train_counts = {}
+        if train_labels is not None:
+            unique_train, counts = np.unique(train_labels, return_counts=True)
+            for label, count in zip(unique_train, counts):
+                train_counts[label] = int(count)
+        
+        val_counts = {}
+        unique_val, counts = np.unique(val_labels, return_counts=True)
+        for label, count in zip(unique_val, counts):
+            val_counts[label] = int(count)
+        
+        # Filter identities based on minimum sample requirements
+        for identity in identity_aps.keys():
+            n_train = train_counts.get(identity, 0)
+            n_val = val_counts.get(identity, 0)
+            
+            meets_criteria = True
+            if min_train_samples is not None and n_train < min_train_samples:
+                meets_criteria = False
+            if min_val_samples is not None and n_val < min_val_samples:
+                meets_criteria = False
+            
+            if meets_criteria:
+                closed_set_identities.append(identity)
+        
+        # Compute closed-set mAP
+        if len(closed_set_identities) > 0:
+            closed_set_mean_aps = [np.mean(identity_aps[identity]) for identity in closed_set_identities]
+            closed_set_map = float(np.mean(closed_set_mean_aps))
+
+    # 3. CMC curve and metrics
+    cmc_curve = (cmc_hits / num_queries).tolist() if num_queries > 0 else [0.0] * max_cmc_rank
+    cmc_at_k = {
+        "cmc@1": cmc_curve[0] if len(cmc_curve) > 0 else 0.0,
+        "cmc@5": cmc_curve[4] if len(cmc_curve) > 4 else 0.0,
+        "cmc@10": cmc_curve[9] if len(cmc_curve) > 9 else 0.0,
+        "cmc@20": cmc_curve[19] if len(cmc_curve) > 19 else 0.0,
+    }
+
+    # 4. Training-sample-stratified mAP
+    stratified_map = {}
+    if train_labels is not None:
+        # Count training samples per identity
+        train_counts = {}
+        unique_train, counts = np.unique(train_labels, return_counts=True)
+        for label, count in zip(unique_train, counts):
+            train_counts[label] = int(count)
+        
+        # Count validation samples per identity
+        val_counts = {}
+        unique_val, counts = np.unique(val_labels, return_counts=True)
+        for label, count in zip(unique_val, counts):
+            val_counts[label] = int(count)
+
+        # Group validation queries by training sample count
+        # Bins define upper bounds (exclusive): [1, 3) → "1-2", [3, 5) → "3-4", etc.
+        strata_bins = [1, 3, 5, 10, 20, 50, float("inf")]
+        strata_names = ["0", "1-2", "3-4", "5-9", "10-19", "20-49", "50+"]
+        strata_aps: dict[str, list[float]] = {name: [] for name in strata_names}
+        
+        # Also stratify by both train and val counts
+        joint_strata_bins = [3, 5, 10, float("inf")]  # Upper boundaries: <3, <5, <10, >=10
+        joint_strata_names = ["0-2", "3-4", "5-9", "10+"]
+        joint_strata_aps: dict[str, list[float]] = {}
+        for train_name in joint_strata_names:
+            for val_name in joint_strata_names:
+                key = f"train_{train_name}_val_{val_name}"
+                joint_strata_aps[key] = []
+
+        for query_idx, (label, ap) in query_aps.items():
+            n_train = train_counts.get(label, 0)
+            n_val = val_counts.get(label, 0)
+            
+            # Find training sample stratum
+            stratum_idx = len(strata_names) - 1  # Default to last bin
+            for i, upper_bound in enumerate(strata_bins):
+                if n_train < upper_bound:
+                    stratum_idx = i
+                    break
+            strata_aps[strata_names[stratum_idx]].append(ap)
+            
+            # Find joint stratum (train x val)
+            train_stratum_idx = len(joint_strata_names) - 1  # Default to last bin
+            for i, upper_bound in enumerate(joint_strata_bins):
+                if n_train < upper_bound:
+                    train_stratum_idx = i
+                    break
+            
+            val_stratum_idx = len(joint_strata_names) - 1  # Default to last bin
+            for i, upper_bound in enumerate(joint_strata_bins):
+                if n_val < upper_bound:
+                    val_stratum_idx = i
+                    break
+            
+            key = f"train_{joint_strata_names[train_stratum_idx]}_val_{joint_strata_names[val_stratum_idx]}"
+            joint_strata_aps[key].append(ap)
+
+        # Compute mean for each stratum (training only)
+        for stratum_name in strata_names:
+            aps = strata_aps[stratum_name]
+            if len(aps) > 0:
+                stratified_map[f"map_train_{stratum_name}"] = float(np.mean(aps))
+            else:
+                stratified_map[f"map_train_{stratum_name}"] = None
+        
+        # Compute mean for each joint stratum
+        for key, aps in joint_strata_aps.items():
+            if len(aps) > 0:
+                stratified_map[f"map_{key}"] = float(np.mean(aps))
+            else:
+                stratified_map[f"map_{key}"] = None
+
+    # Prepare results
+    results = {
+        "map": sample_map,  # Sample-level mAP (backward compatible)
+        "identity_balanced_map": identity_balanced_map,
+        "cmc_curve": cmc_curve,
+        **cmc_at_k,
+        **stratified_map,
+        "num_queries": num_queries,
+        "num_identities": len(identity_aps),
+    }
+    
+    # Add closed-set metrics if computed
+    if closed_set_map is not None:
+        results["closed_set_map"] = closed_set_map
+        results["closed_set_num_identities"] = len(closed_set_identities)
+
+    return results
 
 
-def compute_cmc(
-    embeddings: np.ndarray, labels: np.ndarray, top_k: list[int] | None = None
-) -> dict[int, float]:
+def compute_validation_map(
+    model: ArcFaceModel, val_embeddings: np.ndarray, val_labels: np.ndarray, label_encoder: LabelEncoder, device: str | None = None
+) -> float:
+    """Compute identity-balanced mean Average Precision on validation set.
+
+    DEPRECATED: Use compute_comprehensive_metrics() for more detailed metrics.
+    Kept for backward compatibility.
+
+    Args:
+        model: Trained model
+        val_embeddings: Validation embeddings (num_samples, embedding_dim)
+        val_labels: Validation labels (num_samples,)
+        label_encoder: Label encoder
+        device: Device to run on
+
+    Returns:
+        Identity-balanced mean average precision
+    """
+    metrics = compute_comprehensive_metrics(
+        model=model,
+        val_embeddings=val_embeddings,
+        val_labels=val_labels,
+        train_labels=None,
+        label_encoder=label_encoder,
+        device=device,
+        max_cmc_rank=50,
+    )
+    return metrics["identity_balanced_map"]
+
+
+def compute_cmc(embeddings: np.ndarray, labels: np.ndarray, top_k: list[int] | None = None) -> dict[int, float]:
     """Compute Cumulative Matching Characteristics.
 
     Args:
@@ -125,7 +322,7 @@ def compute_cmc(
     """
     if top_k is None:
         top_k = [1, 5, 10, 20]
-    
+
     # Compute similarity matrix
     sim_matrix = cosine_similarity(embeddings)
     np.fill_diagonal(sim_matrix, -np.inf)  # Exclude self with very negative value
@@ -193,7 +390,7 @@ def validate_resources(config: ReidentificationConfig, model_path: Path | None =
     logger.info("Resource validation passed")
 
 
-def write_summary(summary_data: dict[str, Any], summary_location: Path, to_wandb: bool = False) -> None:
+def write_summary(summary_data: dict[str, Any] | None, summary_location: Path, to_wandb: bool = False) -> None:
     """Write evaluation summary.
 
     Args:
@@ -201,12 +398,13 @@ def write_summary(summary_data: dict[str, Any], summary_location: Path, to_wandb
         summary_location: Path to save summary
         to_wandb: Whether to log to wandb
     """
-    summary_location.parent.mkdir(parents=True, exist_ok=True)
+    if summary_location:
+        summary_location.parent.mkdir(parents=True, exist_ok=True)
 
-    with open(summary_location, "w") as f:
-        json.dump(summary_data, f, indent=2)
+        with open(summary_location, "w") as f:
+            json.dump(summary_data, f, indent=2)
 
-    logger.info(f"Summary written to {summary_location}")
+        logger.info(f"Summary written to {summary_location}")
 
     if to_wandb:
         try:
@@ -225,16 +423,23 @@ def run_processing(
     summary_location: Path | None = None,
     dry_run: bool = False,
     verbose: bool = False,
+    baseline_mode: str | None = None,
 ) -> dict[str, Any]:
     """Core evaluation logic.
+
+    Supports three modes:
+    1. Standard: Evaluate a trained model on test embeddings
+    2. random_baseline: Evaluate random embeddings (sanity check)
+    3. backbone_only: Evaluate pre-computed backbone embeddings without fine-tuning
 
     Args:
         config: Configuration object
         config_dict: Configuration dictionary (alternative)
-        model_path: Path to model checkpoint
+        model_path: Path to model checkpoint (required for standard mode)
         summary_location: Path to save summary
         dry_run: Only validate
         verbose: Verbose logging
+        baseline_mode: Optional baseline mode ("random_baseline" or "backbone_only")
 
     Returns:
         Dictionary with evaluation results
@@ -289,47 +494,118 @@ def run_processing(
 
     # Get test split
     test_data = dataset_metadata.get_split(config.dataset.test_split)
+    
+    # Get train split for stratified metrics
+    train_data = dataset_metadata.get_split(config.dataset.train_split)
 
+    logger_instance.info(f"Train set: {len(train_data)} samples, {train_data.num_classes} classes")
     logger_instance.info(f"Test set: {len(test_data)} samples, {test_data.num_classes} classes")
 
-    # Extract embeddings if needed
-    if test_data.embeddings is None:
-        logger_instance.info("Extracting embeddings...")
+    # Handle baselines
+    if baseline_mode == "random_baseline":
+        logger_instance.info("Running random baseline evaluation (no training)")
+        
+        # Create random embeddings (no need for actual input_size or model)
+        np.random.seed(42)
+        test_embeddings = np.random.randn(len(test_data), config.model.embedding_dim).astype(np.float32)
+        # Normalize
+        test_embeddings = test_embeddings / (np.linalg.norm(test_embeddings, axis=1, keepdims=True) + 1e-12)
+        
+        train_embeddings = np.random.randn(len(train_data), config.model.embedding_dim).astype(np.float32)
+        train_embeddings = train_embeddings / (np.linalg.norm(train_embeddings, axis=1, keepdims=True) + 1e-12)
+    
+    elif baseline_mode == "backbone_only":
+        logger_instance.info("Running backbone-only evaluation (no fine-tuning)")
+        
+        # Load backbone and extract embeddings
         backbone = get_backbone(config.backbone, device)
         backbone.eval()
+        
+        logger_instance.info("Extracting backbone embeddings...")
         test_embeddings = backbone.extract_embeddings(test_data.image_paths, device, desc="Test embeddings")
+        train_embeddings = backbone.extract_embeddings(train_data.image_paths, device, desc="Train embeddings")
+    
     else:
-        logger_instance.info("Using pre-computed embeddings")
-        test_embeddings = test_data.embeddings
+        # Standard evaluation: extract or load embeddings
+        if test_data.embeddings is None:
+            logger_instance.info("Extracting embeddings...")
+            backbone = get_backbone(config.backbone, device)
+            backbone.eval()
+            test_embeddings = backbone.extract_embeddings(test_data.image_paths, device, desc="Test embeddings")
+        else:
+            logger_instance.info("Using pre-computed test embeddings")
+            test_embeddings = test_data.embeddings
+        
+        if train_data.embeddings is None:
+            logger_instance.info("Extracting train embeddings...")
+            backbone = get_backbone(config.backbone, device)
+            backbone.eval()
+            train_embeddings = backbone.extract_embeddings(train_data.image_paths, device, desc="Train embeddings")
+        else:
+            logger_instance.info("Using pre-computed train embeddings")
+            train_embeddings = train_data.embeddings
 
-    # Load model
-    input_dim = test_embeddings.shape[1]
-    model = build_model(input_dim, dataset_metadata.num_classes, config.model)
-    model.to(device)
+    # Load model (only for standard mode, not for baselines)
+    model = None
+    use_embeddings_directly = baseline_mode in ("random_baseline", "backbone_only")
+    
+    if not use_embeddings_directly:
+        # Standard mode: build and load trained model
+        input_dim = test_embeddings.shape[1]
+        model = build_model(input_dim, dataset_metadata.num_classes, config.model)
+        model.to(device)
 
-    if model_path is not None:
-        logger_instance.info(f"Loading model from {model_path}")
-        checkpoint = torch.load(model_path, map_location=device)
-        model.load_state_dict(checkpoint["model_state_dict"])
-        logger_instance.info(f"Loaded checkpoint from epoch {checkpoint.get('epoch', 'unknown')}")
+        if model_path is not None:
+            logger_instance.info(f"Loading model from {model_path}")
+            checkpoint = torch.load(model_path, map_location=device, weights_only=False)
+            model.load_state_dict(checkpoint["model_state_dict"])
+            logger_instance.info(f"Loaded checkpoint from epoch {checkpoint.get('epoch', 'unknown')}")
 
-    model.eval()
+        model.eval()
 
     # Compute metrics
     results: dict[str, Any] = {}
 
     if config.evaluation.compute_map:
-        logger_instance.info("Computing mAP...")
-        test_map = compute_validation_map(model, test_embeddings, test_data.labels_encoded, dataset_metadata.label_encoder, device)
-        results["map"] = float(test_map)
-        logger_instance.info(f"Test mAP: {test_map:.4f}")
+        logger_instance.info("Computing comprehensive metrics...")
+        comprehensive_metrics = compute_comprehensive_metrics(
+            model=model,
+            val_embeddings=test_embeddings,
+            val_labels=test_data.labels_encoded,
+            train_labels=train_data.labels_encoded,
+            label_encoder=dataset_metadata.label_encoder,
+            device=device,
+            max_cmc_rank=50,
+            min_train_samples=3,  # Closed-set: at least 3 training samples
+            min_val_samples=3,    # Closed-set: at least 3 test samples
+            use_embeddings_directly=use_embeddings_directly,
+        )
+        
+        # Log key metrics
+        logger_instance.info(f"Sample-level mAP: {comprehensive_metrics['map']:.4f}")
+        logger_instance.info(f"Identity-balanced mAP: {comprehensive_metrics['identity_balanced_map']:.4f}")
+        if "closed_set_map" in comprehensive_metrics:
+            logger_instance.info(
+                f"Closed-set mAP (≥3 train & test): {comprehensive_metrics['closed_set_map']:.4f} "
+                f"({comprehensive_metrics['closed_set_num_identities']}/{comprehensive_metrics['num_identities']} identities)"
+            )
+        logger_instance.info(f"CMC@1: {comprehensive_metrics['cmc@1']:.4f}")
+        logger_instance.info(f"CMC@5: {comprehensive_metrics['cmc@5']:.4f}")
+        
+        # Add all comprehensive metrics to results
+        results.update(comprehensive_metrics)
 
-    if config.evaluation.compute_cmc:
+    # Note: CMC is now included in comprehensive_metrics, but we keep this for backward compatibility
+    # if compute_map is False
+    if config.evaluation.compute_cmc and not config.evaluation.compute_map:
         logger_instance.info("Computing CMC...")
         # Get fine-tuned embeddings
-        with torch.no_grad():
-            test_tensor = torch.FloatTensor(test_embeddings).to(device)
-            finetuned_emb = model.get_embeddings(test_tensor).cpu().numpy()
+        if use_embeddings_directly:
+            finetuned_emb = test_embeddings
+        else:
+            with torch.no_grad():
+                test_tensor = torch.FloatTensor(test_embeddings).to(device)
+                finetuned_emb = model.get_embeddings(test_tensor).cpu().numpy()
 
         cmc_scores = compute_cmc(finetuned_emb, test_data.labels_encoded, config.evaluation.cmc_top_k)
         results["cmc"] = cmc_scores
@@ -343,9 +619,12 @@ def run_processing(
         output_dir.mkdir(parents=True, exist_ok=True)
 
         if config.evaluation.save_embeddings:
-            with torch.no_grad():
-                test_tensor = torch.FloatTensor(test_embeddings).to(device)
-                finetuned_emb = model.get_embeddings(test_tensor).cpu().numpy()
+            if use_embeddings_directly:
+                finetuned_emb = test_embeddings
+            else:
+                with torch.no_grad():
+                    test_tensor = torch.FloatTensor(test_embeddings).to(device)
+                    finetuned_emb = model.get_embeddings(test_tensor).cpu().numpy()
 
             emb_path = output_dir / "test_embeddings.npy"
             np.save(emb_path, finetuned_emb)
@@ -356,9 +635,7 @@ def run_processing(
             predictions = {
                 "image_paths": test_data.image_paths,
                 "true_labels": test_data.labels,
-                "label_encoder": {
-                    "classes": dataset_metadata.label_encoder.classes_.tolist()
-                }
+                "label_encoder": {"classes": dataset_metadata.label_encoder.classes_.tolist()},
             }
             with open(pred_path, "w") as f:
                 json.dump(predictions, f, indent=2)
@@ -371,9 +648,12 @@ def run_processing(
             import fiftyone as fo
 
             # Get fine-tuned embeddings
-            with torch.no_grad():
-                test_tensor = torch.FloatTensor(test_embeddings).to(device)
-                finetuned_emb = model.get_embeddings(test_tensor).cpu().numpy()
+            if use_embeddings_directly:
+                finetuned_emb = test_embeddings
+            else:
+                with torch.no_grad():
+                    test_tensor = torch.FloatTensor(test_embeddings).to(device)
+                    finetuned_emb = model.get_embeddings(test_tensor).cpu().numpy()
 
             # Load dataset
             fo_dataset = fo.load_dataset(config.evaluation.fo_dataset_name)
@@ -402,7 +682,7 @@ def run_processing(
     }
 
     # Write summary
-    if summary_location is not None:
+    if summary_location is not None or config.wandb.enabled:
         write_summary(final_results, summary_location, config.wandb.enabled)
 
     # Close wandb
@@ -422,9 +702,7 @@ def run_processing(
 
 def main() -> None:
     """CLI Entrypoint."""
-    parser = argparse.ArgumentParser(
-        description="Evaluate jaguar re-identification model", formatter_class=argparse.RawDescriptionHelpFormatter
-    )
+    parser = argparse.ArgumentParser(description="Evaluate jaguar re-identification model", formatter_class=argparse.RawDescriptionHelpFormatter)
 
     # Model args
     parser.add_argument("--model-path", type=Path, required=True, help="Path to model checkpoint")
@@ -447,7 +725,7 @@ def main() -> None:
 
     # Wandb args
     parser.add_argument("--wandb", action="store_true")
-    parser.add_argument("--wandb-project", type=str, default="jaguar-reidentification")
+    parser.add_argument("--wandb-project", type=str, default="camerate-trap-reidentificationentification")
     parser.add_argument("--wandb-entity", type=str)
 
     # Output args

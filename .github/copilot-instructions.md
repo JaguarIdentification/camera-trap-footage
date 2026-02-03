@@ -22,7 +22,6 @@ Jaguar re-identification from camera trap footage using deep learning. The syste
 
 **Critical Files**:
 - [ARCHITECTURE.md](../ARCHITECTURE.md): System design and module boundaries
-- [IMPLEMENTATION_SUMMARY.md](../src/jaguars/reidentification/IMPLEMENTATION_SUMMARY.md): Re-ID implementation details
 - [EXPERIMENTS.md](../src/jaguars/reidentification/EXPERIMENTS.md): Experiment documentation
 
 ### Data Flow (Grouped Dataset Pattern)
@@ -92,7 +91,8 @@ def run_processing(
 def get_experiment_group() -> list[ExperimentConfig]:
     base_config = get_default_config()
     base_config.wandb.enabled = True
-    base_config.wandb.project = "jaguar-reid-category"
+    base_config.wandb.entity = "jaguars"
+    base_config.wandb.project = "camera-trap-reidentification"
     
     return [
         ExperimentConfig(
@@ -158,7 +158,8 @@ def process_samples(
 ### WandB Experiment Tracking
 ```python
 config.wandb.enabled = True
-config.wandb.project = "jaguar-reid-{category}"
+config.wandb.entity = "jaguars"
+config.wandb.project = "camera-trap-reidentification"
 config.wandb.run_name = experiment.name
 config.wandb.tags = ["backbone", "dinov2"]
 ```

@@ -353,6 +353,15 @@ def run_processing(
         report["open_set"] = res
         verify_integrity(dataset, "open_set_split", "Open-Set")
 
+    # also add it to "split" field
+    full_dataset.add_sample_field("split", fo.StringField)
+    main_split_field = "open_set_split" if tag_by == "open" or not add_closed_set else "closed_set_split"
+
+    for split_label in ["train", "val", "test"]:
+        sample_ids = dataset.match(F(main_split_field) == split_label).values("id")
+        if sample_ids:
+            full_dataset.select(sample_ids).set_values("split", [split_label] * len(sample_ids))
+
     # Tag samples by split if requested
     if tag_by == "closed":
         if not add_closed_set:

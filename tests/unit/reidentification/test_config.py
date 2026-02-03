@@ -1,16 +1,15 @@
 """Tests for re-identification configuration module."""
 
-import pytest
 from pathlib import Path
 
 from jaguars.reidentification.config import (
     BackboneConfig,
-    ModelConfig,
     DatasetConfig,
-    TrainingConfig,
     EvaluationConfig,
-    WandbConfig,
+    ModelConfig,
     ReidentificationConfig,
+    TrainingConfig,
+    WandbConfig,
     get_default_config,
     load_config_from_dict,
 )
@@ -68,7 +67,7 @@ def test_wandb_config_defaults() -> None:
     """Test WandbConfig with default values."""
     config = WandbConfig()
     assert config.enabled is True
-    assert config.project == "jaguar-reidentification"
+    assert config.project == "camerate-trap-reidentificationentification"
     assert config.log_frequency == 10
 
 

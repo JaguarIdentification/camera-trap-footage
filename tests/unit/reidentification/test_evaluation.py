@@ -1,16 +1,16 @@
 """Tests for evaluation metrics."""
 
-import pytest
 import numpy as np
+import pytest
 from numpy.typing import NDArray
+from sklearn.preprocessing import LabelEncoder
 
 from jaguars.reidentification.config import ModelConfig
-from jaguars.reidentification.model import ArcFaceModel
 from jaguars.reidentification.evaluation.evaluation import (
-    compute_validation_map,
     compute_cmc,
+    compute_validation_map,
 )
-from sklearn.preprocessing import LabelEncoder
+from jaguars.reidentification.model import ArcFaceModel
 
 
 @pytest.fixture
@@ -52,9 +52,7 @@ def test_compute_validation_map(sample_model: ArcFaceModel, sample_embeddings: t
     """Test computing mean Average Precision."""
     embeddings, labels, label_encoder = sample_embeddings
 
-    map_score = compute_validation_map(
-        sample_model, embeddings, labels, label_encoder, device="cpu"
-    )
+    map_score = compute_validation_map(sample_model, embeddings, labels, label_encoder, device="cpu")
 
     assert isinstance(map_score, float)
     assert 0.0 <= map_score <= 1.0

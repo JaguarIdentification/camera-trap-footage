@@ -5,9 +5,9 @@ import torch
 
 from jaguars.reidentification.config import ModelConfig
 from jaguars.reidentification.model import (
-    EmbeddingProjection,
     ArcFaceLayer,
     ArcFaceModel,
+    EmbeddingProjection,
     build_model,
 )
 
@@ -30,9 +30,7 @@ def test_embedding_projection() -> None:
     hidden_dim = 256
     output_dim = 128
 
-    model = EmbeddingProjection(
-        input_dim=input_dim, hidden_dim=hidden_dim, output_dim=output_dim, dropout=0.3
-    )
+    model = EmbeddingProjection(input_dim=input_dim, hidden_dim=hidden_dim, output_dim=output_dim, dropout=0.3)
 
     # Test forward pass
     batch_size = 4
@@ -49,9 +47,7 @@ def test_arcface_layer() -> None:
     num_classes = 10
     batch_size = 4
 
-    layer = ArcFaceLayer(
-        embedding_dim=embedding_dim, num_classes=num_classes, margin=0.5, scale=32.0
-    )
+    layer = ArcFaceLayer(embedding_dim=embedding_dim, num_classes=num_classes, margin=0.5, scale=32.0)
 
     # Create dummy data
     embeddings = torch.randn(batch_size, embedding_dim)

@@ -98,15 +98,15 @@ class BackboneInterface(ABC, nn.Module):
         return self.config.embedding_dim
 
 
-class MegaDescriptorBackbone(BackboneInterface):
-    """MegaDescriptor (DINOv2) backbone for feature extraction."""
+class TimmBackbone(BackboneInterface):
+    """Generic backbone using timm library (supports DINOv2, MegaDescriptor, ResNet, ConvNeXt, etc.)."""
 
     def __init__(self, config: BackboneConfig):
         super().__init__(config)
 
         # Load pretrained model
         print(f"Loading {config.name} model...")
-        self.model = timm.create_model(config.name, pretrained=config.pretrained)
+        self.model = timm.create_model(config.name, pretrained=config.pretrained, num_classes=0)
         self.model.eval()
 
         # Verify embedding dimension
@@ -124,7 +124,7 @@ class MegaDescriptorBackbone(BackboneInterface):
         print(f"  Embedding dimension: {config.embedding_dim}")
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Extract features using MegaDescriptor.
+        """Extract features using timm backbone.
 
         Args:
             x: Input tensor (batch_size, 3, height, width)
@@ -135,22 +135,44 @@ class MegaDescriptorBackbone(BackboneInterface):
         return cast(torch.Tensor, self.model(x))
 
     def get_preprocess(self) -> transforms.Compose:
-        """Get preprocessing for MegaDescriptor (ImageNet normalization).
+        """Get preprocessing transforms based on model architecture.
+
+        Different models use different normalization:
+        - DINOv2: ImageNet normalization
+        - MegaDescriptor: [-1, 1] normalization (mean=0.5, std=0.5)
+        - ConvNeXt/ResNet/EfficientNet: ImageNet normalization
 
         Returns:
             Composed transformations
         """
+        name_lower = self.config.name.lower()
+
+        # MegaDescriptor models use [-1, 1] normalization
+        if "megadescriptor" in name_lower or "bvra" in name_lower:
+            mean = [0.5, 0.5, 0.5]
+            std = [0.5, 0.5, 0.5]
+        # All other models use ImageNet normalization
+        else:
+            mean = [0.485, 0.456, 0.406]
+            std = [0.229, 0.224, 0.225]
+
         return transforms.Compose(
             [
                 transforms.Resize((self.config.input_size, self.config.input_size)),
                 transforms.ToTensor(),
-                transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+                transforms.Normalize(mean=mean, std=std),
             ]
         )
 
 
 def get_backbone(config: BackboneConfig, device: str | None = None) -> BackboneInterface:
     """Factory function to get backbone by name.
+
+    All models are loaded via timm, which supports:
+    - DINOv2/DINOv3 (Vision Transformers)
+    - MegaDescriptor (Animal re-ID models)
+    - ResNet, ConvNeXt, EfficientNet (CNNs)
+    - Any other timm model
 
     Args:
         config: Backbone configuration
@@ -162,13 +184,7 @@ def get_backbone(config: BackboneConfig, device: str | None = None) -> BackboneI
     if device is None:
         device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    # Determine backbone type from name
-    # Support ViT, DINOv2, ResNet, and other timm models via MegaDescriptorBackbone
-    if "dinov2" in config.name.lower() or "vit" in config.name.lower() or "resnet" in config.name.lower() or "efficientnet" in config.name.lower():
-        backbone = MegaDescriptorBackbone(config)
-    else:
-        # Try to use MegaDescriptorBackbone as fallback for any timm model
-        backbone = MegaDescriptorBackbone(config)
-
+    # Use TimmBackbone for all models
+    backbone = TimmBackbone(config)
     backbone.to(device)
     return backbone

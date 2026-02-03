@@ -20,6 +20,36 @@ from jaguars.reidentification.config import DatasetConfig
 logger = logging.getLogger(__name__)
 
 
+# Mapping from backbone names to FiftyOne embedding field names
+BACKBONE_TO_FIELD_MAP = {
+    # MegaDescriptor models
+    "hf-hub:BVRA/MegaDescriptor-L-384": "embeddings_BVRA_MegaDescriptor_L_384",
+    "BVRA/MegaDescriptor_L_384": "embeddings_BVRA_MegaDescriptor_L_384",
+    "hf-hub:BVRA/MegaDescriptor-B-224": "embeddings_BVRA_MegaDescriptor_B_224",
+    # DINOv2 models
+    "vit_large_patch14_dinov2.lvd142m": "embeddings_DINOv2_Large",
+    "vit_base_patch14_dinov2.lvd142m": "embeddings_DINOv2_Base",
+    "vit_small_patch14_dinov2.lvd142m": "embeddings_DINOv2_Small",
+    # CNN models
+    "resnet50": "embeddings_ResNet50",
+    "convnext_base": "embeddings_ConvNeXt_Base",
+    "convnextv2_base.fcmae_ft_in22k_in1k": "embeddings_ConvNeXtV2_Base",
+    "efficientnet_b3": "embeddings_EfficientNet_B3",
+}
+
+
+def get_embedding_field_for_backbone(backbone_name: str) -> str | None:
+    """Get FiftyOne embedding field name for a backbone.
+
+    Args:
+        backbone_name: Name of the backbone model
+
+    Returns:
+        Embedding field name, or None if no cached embeddings exist
+    """
+    return BACKBONE_TO_FIELD_MAP.get(backbone_name)
+
+
 class DatasetMetadata:
     """Container for dataset metadata."""
 
@@ -59,13 +89,13 @@ class DatasetMetadata:
         new_embeddings = self.embeddings[indices] if self.embeddings is not None else None
         new_split = [self.split[i] for i in indices]
 
-        result = DatasetMetadata(
-            image_paths=new_paths, labels=new_labels, embeddings=new_embeddings, split=new_split, metadata=self.metadata
-        )
+        result = DatasetMetadata(image_paths=new_paths, labels=new_labels, embeddings=new_embeddings, split=new_split, metadata=self.metadata)
         # Use same label encoder
         result.label_encoder = self.label_encoder
         result.labels_encoded = self.label_encoder.transform(new_labels)
-        result.num_classes = self.num_classes
+
+        # Recompute num_classes
+        result.num_classes = len(set(new_labels))
 
         return result
 
@@ -180,6 +210,10 @@ def load_from_huggingface(config: DatasetConfig) -> DatasetMetadata:
 def load_from_fiftyone(config: DatasetConfig) -> DatasetMetadata:
     """Load dataset from FiftyOne.
 
+    Automatically detects cached embeddings for the configured backbone if available.
+    If config.fo_embeddings_field is None, will try to find cached embeddings based
+    on the backbone name using get_embedding_field_for_backbone().
+
     Args:
         config: Dataset configuration
 
@@ -198,6 +232,20 @@ def load_from_fiftyone(config: DatasetConfig) -> DatasetMetadata:
         raise ValueError(f"FiftyOne dataset '{config.fo_dataset_name}' does not exist")
 
     dataset = fo.load_dataset(config.fo_dataset_name)
+
+    # Auto-detect embedding field from backbone name if not specified
+    embedding_field = config.fo_embeddings_field
+    if embedding_field is None and hasattr(config, "backbone") and hasattr(config.backbone, "name"):
+        detected_field = get_embedding_field_for_backbone(config.backbone.name)
+        if detected_field:
+            logger.info(f"Auto-detected embedding field for backbone '{config.backbone.name}': {detected_field}")
+            embedding_field = detected_field
+        else:
+            logger.info(f"No cached embeddings found for backbone '{config.backbone.name}', will compute on-the-fly")
+
+    # Store the detected field back in config for downstream use
+    if embedding_field:
+        config.fo_embeddings_field = embedding_field
 
     image_paths = []
     labels = []
@@ -218,20 +266,29 @@ def load_from_fiftyone(config: DatasetConfig) -> DatasetMetadata:
                 continue
 
             for detection in patches.detections:
-                # Get label
+                # Get label - try detection first, fall back to sample
+                label = None
                 if hasattr(detection, config.fo_label_field):
                     label = getattr(detection, config.fo_label_field)
-                    if label is None:
-                        continue
-                    labels.append(str(label))
-                else:
+
+                # Fallback to sample-level label if not on detection
+                if label is None and hasattr(sample, config.fo_label_field):
+                    label = getattr(sample, config.fo_label_field)
+
+                if label is None:
                     continue
+
+                # Extract label string from Classification object if needed
+                if hasattr(label, "label"):
+                    label = label.label
+
+                labels.append(str(label))
 
                 # Get image path (from parent sample)
                 image_paths.append(sample.filepath)
 
                 # Get embedding if available
-                if hasattr(detection, config.fo_embeddings_field):
+                if config.fo_embeddings_field is not None and hasattr(detection, config.fo_embeddings_field):
                     emb = getattr(detection, config.fo_embeddings_field)
                     if emb is not None:
                         embeddings_list.append(np.array(emb))
@@ -248,18 +305,22 @@ def load_from_fiftyone(config: DatasetConfig) -> DatasetMetadata:
                     splits.append("train")
         else:
             # Load from samples
-            if not hasattr(sample, config.fo_label_field):
-                continue
+            label = None
+            if hasattr(sample, config.fo_label_field):
+                label = getattr(sample, config.fo_label_field)
 
-            label = getattr(sample, config.fo_label_field)
             if label is None:
                 continue
+
+            # Extract label string from Classification object if needed
+            if hasattr(label, "label"):
+                label = label.label
 
             labels.append(str(label))
             image_paths.append(sample.filepath)
 
             # Get embedding
-            if hasattr(sample, config.fo_embeddings_field):
+            if config.fo_embeddings_field is not None and hasattr(sample, config.fo_embeddings_field):
                 emb = getattr(sample, config.fo_embeddings_field)
                 if emb is not None:
                     embeddings_list.append(np.array(emb))

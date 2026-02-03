@@ -22,11 +22,11 @@ from jaguars.common.config import JID_MASTER_DATASET
 from jaguars.common.logging_utils import setup_logger
 from jaguars.ingestion.loaders.csv_loader import ingest_csv_labels
 from jaguars.ingestion.loaders.pptx_loader import ingest_pptx_slides
+from jaguars.ingestion.processing.add_embeddings import run_processing as run_add_embeddings
+from jaguars.ingestion.processing.deduplicate import run_processing as run_deduplicate
 from jaguars.ingestion.processing.sample import run_processing as run_sample
 from jaguars.ingestion.processing.segmentation import run_processing as run_segmentation
-from jaguars.ingestion.processing.add_embeddings import run_processing as run_add_embeddings
 from jaguars.ingestion.processing.split import run_processing as run_split
-from jaguars.ingestion.processing.deduplicate import run_processing as run_deduplicate
 
 logger = setup_logger("ingestion.pipeline")
 

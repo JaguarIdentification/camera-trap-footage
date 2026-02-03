@@ -3,8 +3,8 @@ from pathlib import Path
 
 import fiftyone as fo
 import numpy as np
-from PIL import Image
 from fiftyone import ViewField as F
+from PIL import Image
 
 from jaguars.ingestion.processing.deduplicate import run_processing
 
@@ -42,7 +42,7 @@ def test_deduplicate_hash_marks_duplicates(tmp_path: Path) -> None:
     )
 
     dataset = fo.load_dataset(dataset_name)
-    dup_view = dataset.match(F("is_duplicate") == True)
+    dup_view = dataset.match(F("is_duplicate"))
     assert len(dup_view) == 1
 
     dup_sample = dup_view.first()

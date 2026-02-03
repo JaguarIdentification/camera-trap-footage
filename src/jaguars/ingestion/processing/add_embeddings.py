@@ -5,6 +5,7 @@ and stores them in a sample field.
 """
 
 import argparse
+import contextlib
 import json
 import logging
 import time
@@ -13,16 +14,15 @@ from typing import Any
 
 import fiftyone as fo
 import numpy as np
+import timm
 import torch
 import torchvision.transforms as transforms
 from PIL import Image
 from PIL.Image import Resampling
 from tqdm import tqdm
-import timm
 
 from jaguars.common.config import JID_MASTER_DATASET
 from jaguars.common.logging_utils import setup_logger
-import contextlib
 
 MODULE_NAME = "ingestion.processing.add_embeddings"
 logger = setup_logger(MODULE_NAME)

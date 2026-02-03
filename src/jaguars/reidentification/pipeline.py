@@ -52,7 +52,7 @@ def run_pipeline(
     if steps is None:
         steps = ["train", "evaluate", "export"]
 
-    logger_instance.info("="* 70)
+    logger_instance.info("=" * 70)
     logger_instance.info("Starting Re-identification Pipeline")
     logger_instance.info("=" * 70)
     logger_instance.info(f"Steps: {steps}")
@@ -106,9 +106,7 @@ def run_pipeline(
         if not export_targets:
             logger_instance.info("No export targets configured, skipping export")
         else:
-            export_results = run_export(
-                config=config, model_path=model_path, export_targets=export_targets, verbose=verbose
-            )
+            export_results = run_export(config=config, model_path=model_path, export_targets=export_targets, verbose=verbose)
             results["export"] = export_results
 
             logger_instance.info("Export completed")
@@ -127,9 +125,7 @@ def run_pipeline(
 
 def main() -> None:
     """CLI Entrypoint."""
-    parser = argparse.ArgumentParser(
-        description="Run jaguar re-identification pipeline", formatter_class=argparse.RawDescriptionHelpFormatter
-    )
+    parser = argparse.ArgumentParser(description="Run jaguar re-identification pipeline", formatter_class=argparse.RawDescriptionHelpFormatter)
 
     # Pipeline args
     parser.add_argument(
@@ -159,7 +155,7 @@ def main() -> None:
 
     # Wandb args
     parser.add_argument("--wandb", action="store_true", help="Enable wandb logging")
-    parser.add_argument("--wandb-project", type=str, default="jaguar-reidentification")
+    parser.add_argument("--wandb-project", type=str, default="camerate-trap-reidentificationentification")
     parser.add_argument("--wandb-entity", type=str)
     parser.add_argument("--wandb-run-name", type=str, help="Wandb run name")
 

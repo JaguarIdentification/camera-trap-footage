@@ -43,25 +43,22 @@ def filter_by_count(
     """Tags samples that do not have the expected number of detections."""
     # Find samples where number of detections != expected_count
     # Handle None field (0 detections)
-    
+
     # Expression: field is null OR detections list len check.
-    # Note: F(field) returns the field value. 
+    # Note: F(field) returns the field value.
     # If it's Detections, it doesn't have .detections attribute in the ViewField expression builder same as Python object.
     # In FiftyOne ViewField expressions, you access embedded fields directly or use matching.
-    # Correct way to assume Detections field has 'detections' list inside. 
+    # Correct way to assume Detections field has 'detections' list inside.
     # But F("field") refers to the object.
-    
+
     # View of samples with WRONG count
-    view = dataset.match(
-        (F(segmentation_field) is None) | 
-        (F(f"{segmentation_field}.detections").length() != expected_count)
-    )
-    
+    view = dataset.match((F(segmentation_field) is None) | (F(f"{segmentation_field}.detections").length() != expected_count))
+
     count = len(view)
     if count > 0:
         view.tag_samples(tag)
         logger.info("Tagged %d samples with '%s' (detection count != %d)", count, tag, expected_count)
-    
+
     return count
 
 
@@ -74,33 +71,36 @@ def filter_unexpected_segmentations(
     tag: str = "filter_quality",
 ) -> int:
     """Tags samples with segmentation quality issues (confidence, area)."""
-    # We want to identify samples where ANY detection has issues? 
+    # We want to identify samples where ANY detection has issues?
     # Or samples where the "best" detection has issues?
     # Assuming we filtered for count=1 already, we can check the single detection.
-    # But to be robust, let's tag samples where *any* detection fails criteria 
+    # But to be robust, let's tag samples where *any* detection fails criteria
     # OR if there are no detections (though count filter handles that).
-    
+
     # For ingestion of singular jaguars, we want high quality.
-    
+
     # Filter 1: Low Confidence (already handled by SAM3 threshold usually, but doing explicit check)
     # Filter 2: Area too small or too large
-    
+
     # filter(F("confidence") < min) works on the list 'detections'
-    
+
     # We match samples that HAVE detections BUT they satisfy bad conditions
     view = dataset.exists(segmentation_field).match(
-        F(f"{segmentation_field}.detections").filter(
-            (F("confidence") < min_confidence) |
-            ((F("bounding_box")[2] * F("bounding_box")[3]) < min_area_rel) |
-            ((F("bounding_box")[2] * F("bounding_box")[3]) > max_area_rel)
-        ).length() > 0
+        F(f"{segmentation_field}.detections")
+        .filter(
+            (F("confidence") < min_confidence)
+            | ((F("bounding_box")[2] * F("bounding_box")[3]) < min_area_rel)
+            | ((F("bounding_box")[2] * F("bounding_box")[3]) > max_area_rel)
+        )
+        .length()
+        > 0
     )
-    
+
     count = len(view)
     if count > 0:
         view.tag_samples(tag)
         logger.info("Tagged %d samples with '%s' (quality issues)", count, tag)
-        
+
     return count
 
 
@@ -137,13 +137,13 @@ def run_processing(
     """
     logger_instance = setup_logger(MODULE_NAME, level=logging.DEBUG if verbose else logging.INFO)
     logger_instance.info("Starting segmentation processing pipeline for: %s", dataset_name)
-    
+
     validate_resources(dataset_name)
-    
+
     if dry_run:
         logger_instance.info("DRY RUN: Would segment and filter dataset '%s'", dataset_name)
         return None
-        
+
     # 1. Run SAM3
     logger_instance.info("Running SAM3...")
     dataset = run_sam3(
@@ -161,34 +161,34 @@ def run_processing(
     logger_instance.info("Filtering by detection count...")
     tag_count = "filter_count"
     n_count = filter_by_count(dataset, segmentation_field, expected_count=1, tag=tag_count)
-    
+
     # 3. Filter by quality
     logger_instance.info("Filtering by quality...")
     tag_quality = "filter_quality"
     n_quality = filter_unexpected_segmentations(
-        dataset, 
-        segmentation_field, 
-        min_confidence=sam3_threshold, # Consistency
+        dataset,
+        segmentation_field,
+        min_confidence=sam3_threshold,  # Consistency
         min_area_rel=min_area_rel,
         max_area_rel=max_area_rel,
-        tag=tag_quality
+        tag=tag_quality,
     )
-    
+
     # 4. Optional Manual Inspection
     filter_tags = [tag_count, tag_quality]
     filtered_view = dataset.match_tags(filter_tags)
-    
+
     if inspect_app and len(filtered_view) > 0:
         logger_instance.info("Launching FiftyOne App for manual inspection of %d filtered samples...", len(filtered_view))
         logger_instance.info("Press Enter in terminal to continue to deletion...")
         fo.launch_app(view=filtered_view)
         input("Press Enter to continue...")
         # session.close() # Optional
-        
+
     # 5. Cleanup
     logger_instance.info("Cleaning up filtered samples...")
     total_deleted = cleanup_dataset(dataset, filter_tags)
-    
+
     if summary_location:
         summary = {
             "dataset": dataset_name,
@@ -196,10 +196,10 @@ def run_processing(
             "filtered_count_mismatch": n_count,
             "filtered_quality_issues": n_quality,
             "total_deleted": total_deleted,
-            "final_sample_count": len(dataset)
+            "final_sample_count": len(dataset),
         }
         write_summary(summary, summary_location)
-        
+
     logger_instance.info("Segmentation pipeline complete.")
     return dataset
 
@@ -210,20 +210,20 @@ def main() -> None:
     parser.add_argument("--dataset", type=str, default=JID_MASTER_DATASET)
     parser.add_argument("--field", type=str, default="sam3_segmentations")
     parser.add_argument("--prompt", type=str, default="jaguar")
-    
+
     parser.add_argument("--sam3-threshold", type=float, default=0.5)
     parser.add_argument("--sam3-mask-threshold", type=float, default=0.5)
-    
+
     parser.add_argument("--min-area", type=float, default=0.01)
     parser.add_argument("--max-area", type=float, default=1.0)
-    
+
     parser.add_argument("--inspect", action="store_true", help="Wait for manual inspection in App")
     parser.add_argument("--summary-location", type=Path, default=None)
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--verbose", action="store_true")
-    
+
     args = parser.parse_args()
-    
+
     try:
         run_processing(
             dataset_name=args.dataset,
@@ -236,11 +236,12 @@ def main() -> None:
             inspect_app=args.inspect,
             summary_location=args.summary_location,
             dry_run=args.dry_run,
-            verbose=args.verbose
+            verbose=args.verbose,
         )
     except Exception as e:
         logger.error("Segmentation pipeline failed: %s", e, exc_info=True)
         raise
+
 
 if __name__ == "__main__":
     main()

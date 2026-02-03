@@ -6,7 +6,7 @@ model architecture, and dataset loading.
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal, Any
+from typing import Any, Literal
 
 
 @dataclass
@@ -74,6 +74,37 @@ class TrainingConfig:
     batch_size: int = 32
     num_epochs: int = 50
 
+    # Loss function
+    loss_name: Literal[
+        "cross_entropy",
+        "label_smoothing",
+        "focal",
+        "multi_margin",
+        "nll",
+        "arcface",
+        "subcenter_arcface",
+        "triplet",
+        "arcface_triplet",
+        "random_baseline",
+        "backbone_only",
+    ] = "arcface"
+    label_smoothing: float = 0.1
+    focal_gamma: float = 2.0
+    focal_alpha: float | None = None
+    multi_margin_p: int = 1
+    multi_margin_margin: float = 1.0
+
+    # Triplet loss config
+    triplet_margin: float = 0.3
+    triplet_mining: Literal["all", "hard", "semi-hard"] = "hard"
+    triplet_distance: Literal["euclidean", "cosine"] = "euclidean"
+    triplet_weight: float = 0.5  # Weight when combined with classification loss
+
+    # PK Sampler config (for triplet loss)
+    use_pk_sampler: bool = False
+    pk_p: int = 8  # Number of classes per batch
+    pk_k: int = 4  # Number of samples per class
+
     # Scheduler
     scheduler_type: Literal["reduce_on_plateau", "cosine", "step"] = "reduce_on_plateau"
     scheduler_patience: int = 5
@@ -120,7 +151,7 @@ class WandbConfig:
 
     enabled: bool = True
     entity: str | None = None
-    project: str = "jaguar-reidentification"
+    project: str = "camera-trap-reidentification"
     run_name: str | None = None
     tags: list[str] = field(default_factory=list)
     notes: str | None = None
@@ -142,6 +173,7 @@ class ReidentificationConfig:
     training: TrainingConfig = field(default_factory=TrainingConfig)
     evaluation: EvaluationConfig = field(default_factory=EvaluationConfig)
     wandb: WandbConfig = field(default_factory=WandbConfig)
+    baseline_mode: str | None = None  # "random_baseline" or "backbone_only" for baseline evaluation modes
 
     # Runtime
     seed: int = 42
@@ -172,6 +204,7 @@ def get_default_config() -> ReidentificationConfig:
 
 def load_config_from_dict(config_dict: dict[str, Any]) -> ReidentificationConfig:
     """Load configuration from dictionary."""
+
     # Recursively convert nested dicts to dataclasses
     def _nested_dataclass(cls: type, data: Any) -> Any:
         if not isinstance(data, dict):
@@ -183,7 +216,7 @@ def load_config_from_dict(config_dict: dict[str, Any]) -> ReidentificationConfig
             if key in fieldtypes:
                 field_type = fieldtypes[key]
                 # Check if field type is a dataclass
-                if hasattr(field_type, '__dataclass_fields__'):
+                if hasattr(field_type, "__dataclass_fields__"):
                     kwargs[key] = _nested_dataclass(field_type, value)
                 else:
                     kwargs[key] = value

@@ -45,7 +45,7 @@ def _get_variant_view(
     dedup_field: str,
 ) -> fo.DatasetView:
     """Get dataset view for a specific variant.
-    
+
     Supported variants:
     - master: Full dataset with all samples
     - segmented_deduplicated: Segmented samples, duplicates removed
@@ -60,7 +60,7 @@ def _get_variant_view(
         return dataset
 
     view = _get_image_view(dataset)
-    
+
     # Apply segmentation filter
     if variant == "segmented_deduplicated" or variant == "segmented":
         if segmentation_field in view.get_field_schema():
@@ -77,7 +77,7 @@ def _get_variant_view(
     elif variant == "deduplicated":
         # Just filter duplicates, no segmentation filter
         pass
-    
+
     # Apply deduplication filter
     if "deduplicated" in variant:
         if dedup_field in view.get_field_schema():
@@ -90,7 +90,7 @@ def _get_variant_view(
 
 def _export_variant_to_disk(view: fo.DatasetView, export_dir: Path, overwrite: bool = True, include_fields: list[str] | None = None) -> None:
     """Export variant to disk.
-    
+
     Args:
         view: Dataset view to export
         export_dir: Directory to export to
@@ -98,7 +98,7 @@ def _export_variant_to_disk(view: fo.DatasetView, export_dir: Path, overwrite: b
         include_fields: List of field names to include (None = all fields)
     """
     export_dir.mkdir(parents=True, exist_ok=True)
-    
+
     # Ensure jaguar_id is always included if it exists
     if include_fields is None:
         # Export all fields
@@ -114,7 +114,7 @@ def _export_variant_to_disk(view: fo.DatasetView, export_dir: Path, overwrite: b
             fields_to_export.append("jaguar_id")
         if "ground_truth" in view.get_field_schema() and "ground_truth" not in fields_to_export:
             fields_to_export.append("ground_truth")
-        
+
         view.export(
             export_dir=str(export_dir),
             dataset_type=fo.types.FiftyOneDataset,
@@ -140,8 +140,8 @@ def _export_variant_to_huggingface(
     view: fo.DatasetView,
     repo_name: str,
 ) -> None:
-    from huggingface_hub import login
     from fiftyone.utils.huggingface import push_to_hub
+    from huggingface_hub import login
 
     login()
     push_to_hub(

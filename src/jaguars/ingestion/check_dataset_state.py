@@ -12,27 +12,29 @@ project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root / "src"))
 
 import fiftyone as fo
+
 from jaguars.common.config import JID_MASTER_DATASET
+
 
 def check_dataset_state(dataset_name: str = JID_MASTER_DATASET) -> dict:
     """Check which steps have been completed in the dataset."""
-    
+
     if not fo.dataset_exists(dataset_name):
         print(f"❌ Dataset '{dataset_name}' does not exist")
         return {"exists": False}
-    
+
     print(f"✓ Dataset '{dataset_name}' exists\n")
-    
+
     dataset = fo.load_dataset(dataset_name)
     state = {"exists": True}
-    
+
     # Basic stats
     print(f"{'='*70}")
     print("DATASET OVERVIEW")
     print(f"{'='*70}")
     print(f"Total samples: {len(dataset)}")
     print(f"Group field: {dataset.group_field}")
-    
+
     if dataset.group_field:
         images_view = dataset.select_group_slices("image")
         videos_view = dataset.select_group_slices("video")
@@ -43,7 +45,7 @@ def check_dataset_state(dataset_name: str = JID_MASTER_DATASET) -> dict:
     else:
         images_view = dataset
         state["images_count"] = len(dataset)
-    
+
     # Check fields
     fields = dataset.get_field_schema()
     print(f"\n{'='*70}")
@@ -51,7 +53,7 @@ def check_dataset_state(dataset_name: str = JID_MASTER_DATASET) -> dict:
     print(f"{'='*70}")
     for field_name, field_type in fields.items():
         print(f"  {field_name}: {field_type}")
-    
+
     # Check tags
     tags = dataset.distinct("tags")
     print(f"\n{'='*70}")
@@ -63,12 +65,12 @@ def check_dataset_state(dataset_name: str = JID_MASTER_DATASET) -> dict:
             print(f"  {tag}: {count} samples")
     else:
         print("  No tags found")
-    
+
     # Check ingestion steps completion
     print(f"\n{'='*70}")
     print("INGESTION STEPS STATUS")
     print(f"{'='*70}")
-    
+
     # Step 1: CSV/PPTX Loading
     has_jaguar_id = "jaguar_id" in fields or "ground_truth" in fields
     has_pptx = "pptx_detections" in fields
@@ -83,13 +85,13 @@ def check_dataset_state(dataset_name: str = JID_MASTER_DATASET) -> dict:
         print(f"  Samples with PPTX detections: {num_with_pptx}")
     state["csv_loaded"] = has_jaguar_id
     state["pptx_loaded"] = has_pptx
-    
+
     # Step 2: Video Sampling
     if dataset.group_field:
         sampled_images = sum(1 for s in images_view if s.source_type == "video_frame")
         print(f"✓ Video Frames Sampled: {sampled_images} samples")
         state["frames_sampled"] = sampled_images
-    
+
     # Step 3: Segmentation
     segmentation_fields = [f for f in fields if "segmentation" in f.lower() or f == "detections"]
     has_segmentation = len(segmentation_fields) > 0
@@ -100,12 +102,12 @@ def check_dataset_state(dataset_name: str = JID_MASTER_DATASET) -> dict:
             count = len(images_view.exists(field))
             print(f"  Samples with {field}: {count}")
             state[f"segmentation_{field}"] = count
-    
+
     # Step 4: Embeddings
     # Check for sample-level embeddings (full images)
     sample_embedding_fields = [f for f in fields if f.endswith("embeddings") or f == "embedding" or f.startswith("embeddings_")]
     has_sample_embeddings = len(sample_embedding_fields) > 0
-    
+
     # Check for detection-level embeddings (segmented patches)
     detection_embedding_info = {}
     for seg_field in segmentation_fields:
@@ -127,31 +129,28 @@ def check_dataset_state(dataset_name: str = JID_MASTER_DATASET) -> dict:
                                     if any(d.has_field(ef) and d[ef] is not None for ef in det_emb_fields):
                                         count += 1
                                         break
-                        detection_embedding_info[seg_field] = {
-                            "fields": det_emb_fields,
-                            "samples_with_embeddings": count
-                        }
+                        detection_embedding_info[seg_field] = {"fields": det_emb_fields, "samples_with_embeddings": count}
         except Exception:
             pass
-    
+
     has_detection_embeddings = len(detection_embedding_info) > 0
     has_embeddings = has_sample_embeddings or has_detection_embeddings
-    
+
     print(f"✓ Embeddings Computed: {'YES' if has_embeddings else 'NO'}")
-    
+
     if has_sample_embeddings:
         print(f"  Sample-level embeddings (full images):")
         for emb_field in sample_embedding_fields:
             count = len(images_view.exists(emb_field))
             print(f"    {emb_field}: {count} samples")
             state[f"embeddings_{emb_field}"] = count
-    
+
     if has_detection_embeddings:
         print(f"  Detection-level embeddings (segmented patches):")
         for seg_field, info in detection_embedding_info.items():
             print(f"    {seg_field} detections with {info['fields']}: {info['samples_with_embeddings']} samples")
-            state[f"detection_embeddings_{seg_field}"] = info['samples_with_embeddings']
-    
+            state[f"detection_embeddings_{seg_field}"] = info["samples_with_embeddings"]
+
     # Step 5: Splits
     split_fields = [f for f in fields if "split" in f.lower()]
     has_splits = len(split_fields) > 0
@@ -166,7 +165,7 @@ def check_dataset_state(dataset_name: str = JID_MASTER_DATASET) -> dict:
                     count = len(dataset.match(fo.ViewField(field) == split_val))
                     print(f"    {split_val}: {count} samples")
         state["splits"] = split_fields
-    
+
     # Step 6: Deduplication
     has_dedup = "is_duplicate" in fields
     print(f"✓ Deduplication: {'YES' if has_dedup else 'NO'}")
@@ -174,7 +173,7 @@ def check_dataset_state(dataset_name: str = JID_MASTER_DATASET) -> dict:
         duplicates = len(dataset.match(fo.ViewField("is_duplicate") == True))
         print(f"  Duplicates flagged: {duplicates}")
         state["duplicates_flagged"] = duplicates
-    
+
     # Brain results
     brain_keys = dataset.list_brain_runs()
     if brain_keys:
@@ -183,11 +182,11 @@ def check_dataset_state(dataset_name: str = JID_MASTER_DATASET) -> dict:
         print(f"{'='*70}")
         for key in brain_keys:
             print(f"  {key}")
-    
+
     print(f"\n{'='*70}")
     print("RECOMMENDATIONS")
     print(f"{'='*70}")
-    
+
     recommendations = []
     if not has_jaguar_id:
         recommendations.append("⚠ Run Step 1a: CSV Labels Ingestion")
@@ -203,13 +202,13 @@ def check_dataset_state(dataset_name: str = JID_MASTER_DATASET) -> dict:
         recommendations.append("⚠ Run Step 5: Create Splits")
     if not has_dedup:
         recommendations.append("⚠ Run Step 6: Deduplication")
-    
+
     if recommendations:
         for rec in recommendations:
             print(rec)
     else:
         print("✅ All ingestion steps appear complete!")
-    
+
     return state
 
 

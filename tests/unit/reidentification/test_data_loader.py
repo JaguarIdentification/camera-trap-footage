@@ -1,17 +1,18 @@
 """Tests for dataset loading utilities."""
 
-import pytest
-import numpy as np
-from pathlib import Path
 import tempfile
-from PIL import Image
 from collections.abc import Iterator
+from pathlib import Path
+
+import numpy as np
+import pytest
+from PIL import Image
 
 from jaguars.reidentification.config import DatasetConfig
 from jaguars.reidentification.data_loader import (
     DatasetMetadata,
-    load_from_disk,
     load_dataset,
+    load_from_disk,
     save_metadata,
 )
 
@@ -61,9 +62,7 @@ def test_dataset_metadata_with_embeddings() -> None:
     labels = ["class_a", "class_a"]
     embeddings = np.random.randn(2, 128)
 
-    metadata = DatasetMetadata(
-        image_paths=image_paths, labels=labels, embeddings=embeddings
-    )
+    metadata = DatasetMetadata(image_paths=image_paths, labels=labels, embeddings=embeddings)
 
     assert metadata.embeddings is not None
     assert metadata.embeddings.shape == (2, 128)
@@ -75,9 +74,7 @@ def test_dataset_metadata_with_splits() -> None:
     labels = ["a", "b", "a"]
     splits = ["train", "train", "val"]
 
-    metadata = DatasetMetadata(
-        image_paths=image_paths, labels=labels, split=splits
-    )
+    metadata = DatasetMetadata(image_paths=image_paths, labels=labels, split=splits)
 
     assert metadata.split == splits
 
@@ -89,9 +86,7 @@ def test_dataset_metadata_get_split() -> None:
     splits = ["train", "train", "val", "val"]
     embeddings = np.random.randn(4, 64)
 
-    metadata = DatasetMetadata(
-        image_paths=image_paths, labels=labels, embeddings=embeddings, split=splits
-    )
+    metadata = DatasetMetadata(image_paths=image_paths, labels=labels, embeddings=embeddings, split=splits)
 
     train_metadata = metadata.get_split("train")
 

@@ -165,9 +165,7 @@ def export_to_fiftyone(
     logger.info(f"Updated {num_updated}/{len(image_paths)} samples in FiftyOne")
 
 
-def export_to_huggingface(
-    embeddings: np.ndarray, image_paths: list[str], labels: list[str], repo_name: str, private: bool = True
-) -> None:
+def export_to_huggingface(embeddings: np.ndarray, image_paths: list[str], labels: list[str], repo_name: str, private: bool = True) -> None:
     """Export to HuggingFace dataset.
 
     Args:
@@ -278,7 +276,7 @@ def run_processing(
         model = build_model(input_dim, dataset_metadata.num_classes, config.model)
         model.to(device)
 
-        checkpoint = torch.load(model_path, map_location=device)
+        checkpoint = torch.load(model_path, map_location=device, weights_only=False)
         model.load_state_dict(checkpoint["model_state_dict"])
         model.eval()
 
@@ -342,9 +340,7 @@ def main() -> None:
     parser.add_argument("--fo-dataset", type=str, default="JID_Master_Dataset")
 
     # Export args
-    parser.add_argument(
-        "--export-to", nargs="+", choices=["disk", "fiftyone", "huggingface"], default=["disk"], help="Export targets"
-    )
+    parser.add_argument("--export-to", nargs="+", choices=["disk", "fiftyone", "huggingface"], default=["disk"], help="Export targets")
     parser.add_argument("--output-dir", type=Path, default=Path("data/results/reidentification"))
     parser.add_argument("--hf-repo", type=str, help="HuggingFace repo for export")
 
