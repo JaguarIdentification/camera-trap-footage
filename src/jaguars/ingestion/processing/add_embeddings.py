@@ -9,6 +9,7 @@ import contextlib
 import json
 import logging
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -53,21 +54,23 @@ def get_device() -> torch.device:
 
 @torch.no_grad()
 def compute_embeddings_batch(
-    items: list[tuple[str, list[float] | None | Any, np.ndarray | None]],
+    items: list[tuple[str, list[float] | None | Any, np.ndarray | tuple[str, str] | None]],
     model: torch.nn.Module,
     preprocess: transforms.Compose,
     device: torch.device,
     batch_size: int = 32,
+    mask_resolver: Callable[[tuple[str, str]], Any | None] | None = None,
 ) -> tuple[dict[int, np.ndarray], list[str]]:
     """Compute embeddings for a list of items (filepaths + optional bboxes + optional masks).
 
     Args:
-        items: List of (filepath, bbox, mask) tuples. bbox is [x, y, w, h] (normalized) or None.
-               mask may be None, a numpy array, a PIL Image, or a path to an image.
+         items: List of (filepath, bbox, mask) tuples. bbox is [x, y, w, h] (normalized) or None.
+             mask may be None, a numpy array, a PIL Image, a path to an image, or a lazy (sample_id, det_id) reference.
         model: Loaded PyTorch model
         preprocess: Transform pipeline
         device: Torch device
         batch_size: Number of images to process per batch
+         mask_resolver: Optional resolver for lazy (sample_id, det_id) mask references
 
     Returns:
         Tuple of (Dictionary mapping index in input list to embedding numpy array, List of error messages)
@@ -75,9 +78,14 @@ def compute_embeddings_batch(
     embeddings_map = {}
     errors = []
 
-    # We iterate by index to handle batches
-    for i in tqdm(range(0, len(items), batch_size), desc="Computing embeddings", leave=False):
-        batch_items = items[i : i + batch_size]
+    # We iterate by index with adaptive batch sizing to recover from GPU OOM
+    i = 0
+    adaptive_batch_size = max(1, batch_size)
+
+    progress = tqdm(total=len(items), desc="Computing embeddings", leave=False)
+    while i < len(items):
+        current_batch_size = min(adaptive_batch_size, len(items) - i)
+        batch_items = items[i : i + current_batch_size]
 
         batch_tensors = []
         valid_indices = []
@@ -105,6 +113,9 @@ def compute_embeddings_batch(
 
                 # If a mask is provided, apply it so only masked pixels remain
                 if mask is not None:
+                    if mask_resolver is not None and isinstance(mask, tuple):
+                        mask = mask_resolver(mask)
+
                     # Normalize mask to a PIL Image in 'L' mode
                     try:
                         if isinstance(mask, str) and Path(mask).exists():
@@ -137,17 +148,49 @@ def compute_embeddings_batch(
                 errors.append(error_msg)
 
         if not batch_tensors:
+            i += current_batch_size
+            progress.update(current_batch_size)
             continue
 
         # Stack and move to device
-        batch_tensor = torch.stack(batch_tensors).to(device)
+        try:
+            batch_tensor = torch.stack(batch_tensors).to(device)
 
-        # Get embeddings
-        batch_emb = model(batch_tensor).cpu().numpy()
+            # Get embeddings
+            if device.type == "cuda":
+                with torch.autocast(device_type="cuda", dtype=torch.float16):
+                    batch_output = model(batch_tensor)
+            else:
+                batch_output = model(batch_tensor)
+
+            batch_emb = batch_output.detach().cpu().numpy()
+        except RuntimeError as exc:
+            oom_error = "out of memory" in str(exc).lower()
+            if device.type == "cuda" and oom_error and current_batch_size > 1:
+                adaptive_batch_size = max(1, current_batch_size // 2)
+                logger.warning(
+                    "CUDA OOM at batch size %d. Reducing batch size to %d and retrying.",
+                    current_batch_size,
+                    adaptive_batch_size,
+                )
+                with contextlib.suppress(Exception):
+                    torch.cuda.empty_cache()
+                continue
+            raise
+        finally:
+            with contextlib.suppress(Exception):
+                del batch_tensor
+            with contextlib.suppress(Exception):
+                del batch_output
 
         # Store with indices as keys
         for j in range(len(valid_indices)):
             embeddings_map[valid_indices[j]] = batch_emb[j].flatten()
+
+        i += current_batch_size
+        progress.update(current_batch_size)
+
+    progress.close()
 
     return embeddings_map, errors
 
@@ -213,6 +256,7 @@ def run_processing(
 
     items = []
     sample_det_map = []  # List of (sample_id, detection_id) for patch mapping
+    mask_resolver: Callable[[tuple[str, str]], Any | None] | None = None
 
     if patches_field:
         logger_instance.info("Gathering detection patches from field '%s'...", patches_field)
@@ -220,8 +264,13 @@ def run_processing(
         # We use iter_samples on the view (which is typically the 'image' slice)
         # Note: We do NOT convert to patches view here to allow robust write-back later
 
+        if mask_field:
+            field_selection = ["filepath", f"{patches_field}.detections.bounding_box"]
+        else:
+            field_selection = [patches_field, "filepath"]
+
         count = 0
-        for sample in view.select_fields([patches_field, "filepath"]).iter_samples(autosave=False):
+        for sample in view.select_fields(field_selection).iter_samples(autosave=False):
             if sample[patches_field] is None:
                 continue
 
@@ -231,16 +280,42 @@ def run_processing(
                 continue
 
             for det in detections_obj.detections:
-                mask = None
+                mask: np.ndarray | tuple[str, str] | None = None
                 if mask_field:
-                    with contextlib.suppress(Exception):
-                        mask = getattr(det, mask_field) if hasattr(det, mask_field) else det.get(mask_field)
+                    mask = (sample.id, det.id)
 
                 items.append((sample.filepath, det.bounding_box, mask))
                 sample_det_map.append((sample.id, det.id))
                 count += 1
 
         logger_instance.info("Collected %d patches.", count)
+
+        if mask_field:
+            last_sample_id: str | None = None
+            last_sample_det_map: dict[str, Any] = {}
+
+            def resolve_mask(mask_ref: tuple[str, str]) -> Any | None:
+                nonlocal last_sample_id, last_sample_det_map
+
+                sample_id, det_id = mask_ref
+                if sample_id != last_sample_id:
+                    sample_full = dataset[sample_id]
+                    detections_full = sample_full[patches_field]
+                    if detections_full and hasattr(detections_full, "detections"):
+                        last_sample_det_map = {d.id: d for d in detections_full.detections}
+                    else:
+                        last_sample_det_map = {}
+                    last_sample_id = sample_id
+
+                det = last_sample_det_map.get(det_id)
+                if det is None:
+                    return None
+
+                with contextlib.suppress(Exception):
+                    return getattr(det, mask_field) if hasattr(det, mask_field) else det.get(mask_field)
+                return None
+
+            mask_resolver = resolve_mask
     else:
         if len(view) == 0:
             logger_instance.warning("No samples found to process.")
@@ -281,69 +356,118 @@ def run_processing(
         ]
     )
 
-    # Compute Embeddings
-    logger_instance.info("Computing embeddings...")
-    compute_start = time.time()
-    embeddings_map, errors = compute_embeddings_batch(items, model, preprocess, device, batch_size=batch_size)
-    compute_time = time.time() - compute_start
-
-    if errors:
-        logger_instance.warning("Encountered %d errors during processing", len(errors))
-        for err in errors[:5]:  # Log first few errors
-            logger_instance.debug(err)
-
-    logger_instance.info("Computed %d embeddings in %.2f seconds", len(embeddings_map), compute_time)
-
-    # Save to Dataset
-    logger_instance.info("Saving embeddings to field '%s'...", embedding_field)
-
+    compute_time = 0.0
+    errors: list[str] = []
     samples_with_embeddings_count = 0
 
-    if patches_field:
-        # Save back to detections using collected IDs
-        updates_by_sample: dict[str, dict[str, np.ndarray]] = {}
+    try:
+        # Compute Embeddings
+        logger_instance.info("Computing embeddings...")
+        compute_start = time.time()
+        try:
+            embeddings_map, errors = compute_embeddings_batch(
+                items,
+                model,
+                preprocess,
+                device,
+                batch_size=batch_size,
+                mask_resolver=mask_resolver,
+            )
+        except RuntimeError as e:
+            e_str = str(e).lower()
+            should_fallback_to_cpu = device.type == "cuda" and ("out of memory" in e_str or "cuda" in e_str)
+            if not should_fallback_to_cpu:
+                raise
 
-        for idx in range(len(items)):
-            if idx in embeddings_map:
-                s_id, d_id = sample_det_map[idx]
-                if s_id not in updates_by_sample:
-                    updates_by_sample[s_id] = {}
-                updates_by_sample[s_id][d_id] = embeddings_map[idx]
-                samples_with_embeddings_count += 1
+            logger_instance.warning(
+                "CUDA failed during embedding computation (%s). Falling back to CPU with batch_size=1.",
+                e,
+            )
+            with contextlib.suppress(Exception):
+                torch.cuda.empty_cache()
+            with contextlib.suppress(Exception):
+                torch.cuda.ipc_collect()
 
-        logger_instance.info("Updating %d samples with new detection embeddings...", len(updates_by_sample))
+            device = torch.device("cpu")
+            model = timm.create_model(model_name, pretrained=True)
+            model.eval()
+            model.to(device)
+            embeddings_map, errors = compute_embeddings_batch(
+                items,
+                model,
+                preprocess,
+                device,
+                batch_size=1,
+                mask_resolver=mask_resolver,
+            )
 
-        for s_id, det_updates in tqdm(updates_by_sample.items(), desc="Saving results", leave=False):
-            # Load sample from dataset directly
-            sample = dataset[s_id]
+        compute_time = time.time() - compute_start
 
-            dirty = False
-            detections_obj = sample[patches_field]
-            if detections_obj and hasattr(detections_obj, "detections"):
-                for det in detections_obj.detections:
-                    if det.id in det_updates:
-                        det[embedding_field] = det_updates[det.id]
-                        dirty = True
+        if errors:
+            logger_instance.warning("Encountered %d errors during processing", len(errors))
+            for err in errors[:5]:  # Log first few errors
+                logger_instance.debug(err)
 
-            if dirty:
-                sample.save()
+        logger_instance.info("Computed %d embeddings in %.2f seconds", len(embeddings_map), compute_time)
 
-    else:
-        # Store embeddings in order for set_values
-        ordered_embeddings: list[np.ndarray[tuple[Any, ...], np.dtype[Any]] | None] = []
+        # Save to Dataset
+        logger_instance.info("Saving embeddings to field '%s'...", embedding_field)
 
-        # Iterate indices matching the items list
-        for idx in range(len(items)):
-            if idx in embeddings_map:
-                ordered_embeddings.append(embeddings_map[idx])
-                samples_with_embeddings_count += 1
-            else:
-                ordered_embeddings.append(None)
+        samples_with_embeddings_count = 0
 
-        view.set_values(embedding_field, ordered_embeddings)
-        dataset.save()
+        if patches_field:
+            # Save back to detections using collected IDs
+            updates_by_sample: dict[str, dict[str, np.ndarray]] = {}
 
-    dataset.reload()
+            for idx in range(len(items)):
+                if idx in embeddings_map:
+                    s_id, d_id = sample_det_map[idx]
+                    if s_id not in updates_by_sample:
+                        updates_by_sample[s_id] = {}
+                    updates_by_sample[s_id][d_id] = embeddings_map[idx]
+                    samples_with_embeddings_count += 1
+
+            logger_instance.info("Updating %d samples with new detection embeddings...", len(updates_by_sample))
+
+            for s_id, det_updates in tqdm(updates_by_sample.items(), desc="Saving results", leave=False):
+                # Load sample from dataset directly
+                sample = dataset[s_id]
+
+                dirty = False
+                detections_obj = sample[patches_field]
+                if detections_obj and hasattr(detections_obj, "detections"):
+                    for det in detections_obj.detections:
+                        if det.id in det_updates:
+                            det[embedding_field] = det_updates[det.id]
+                            dirty = True
+
+                if dirty:
+                    sample.save()
+
+        else:
+            # Store embeddings in order for set_values
+            ordered_embeddings: list[np.ndarray[tuple[Any, ...], np.dtype[Any]] | None] = []
+
+            # Iterate indices matching the items list
+            for idx in range(len(items)):
+                if idx in embeddings_map:
+                    ordered_embeddings.append(embeddings_map[idx])
+                    samples_with_embeddings_count += 1
+                else:
+                    ordered_embeddings.append(None)
+
+            view.set_values(embedding_field, ordered_embeddings)
+            dataset.save()
+
+        dataset.reload()
+    finally:
+        with contextlib.suppress(Exception):
+            del model
+        if device.type == "cuda":
+            with contextlib.suppress(Exception):
+                torch.cuda.empty_cache()
+            with contextlib.suppress(Exception):
+                torch.cuda.ipc_collect()
 
     if summary_location:
         summary = {

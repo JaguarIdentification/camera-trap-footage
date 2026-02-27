@@ -34,6 +34,10 @@ from jaguars.ingestion.loaders.video_utils import batch_convert_avi
 MODULE_NAME = "ingestion.loaders.csv_loader"
 logger = setup_logger(MODULE_NAME)
 
+VIDEO_EXTENSIONS = {".mp4", ".mov", ".avi", ".mkv"}
+IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png"}
+MEDIA_EXTENSIONS = VIDEO_EXTENSIONS | IMAGE_EXTENSIONS
+
 
 def validate_resources(input_dir: Path, input_csv: Path) -> None:
     """Checks if inputs exist."""
@@ -139,7 +143,10 @@ def find_videos_without_labels(df: pd.DataFrame, input_dir: Path) -> tuple[pd.Da
 
     for ext in [".MP4", ".mp4", ".mov", ".MOV", ".avi", ".AVI"]:
         video_files = list(input_dir.rglob(f"*{ext}"))
-        all_video_files.update([str(p.relative_to(input_dir).as_posix()) for p in video_files])
+        for p in video_files:
+            rel = str(p.relative_to(input_dir).as_posix())
+            if _is_jaguar_candidate_in_new_tree(rel):
+                all_video_files.add(rel)
 
     unlabeled_files = all_video_files - labeled_files
     logger.info("Found %d video files without labels", len(unlabeled_files))
@@ -175,17 +182,27 @@ def filter_rows_with_invalid_paths(df: pd.DataFrame, input_dir: Path) -> tuple[p
 
 
 def convert_avi_entries(df: pd.DataFrame, input_dir: Path) -> tuple[pd.DataFrame, dict[str, Any]]:
-    """Convert AVI files referenced in the dataframe to MP4 and update paths.
+    """Convert AVI files once and update dataframe paths/extensions to MP4.
 
-    - Finds rows with FILE PATH ending in .avi/.AVI or FILE EXTENSION == .avi/.AVI
-    - Converts corresponding files on disk to .MP4 using ffmpeg via `batch_convert_avi`
-    - Updates the dataframe's FILE PATH to the new .MP4 relative path when conversion succeeded
-    - Updates FILE EXTENSION to '.MP4' for converted rows
+    - Converts all AVI files found recursively in ``input_dir`` to ``.MP4``
+    - Skips conversion when output ``.MP4`` already exists
+    - Updates dataframe ``FILE PATH``/``FILE EXTENSION`` for AVI rows when MP4 is available
 
     Returns the possibly updated dataframe and a conversion report dict.
     """
+    avi_files = [p.resolve() for p in input_dir.rglob("*.avi") if p.is_file()]
+    avi_files += [p.resolve() for p in input_dir.rglob("*.AVI") if p.is_file()]
+    unique_avi_files = list(dict.fromkeys(avi_files))
+
+    if unique_avi_files:
+        logger.info("Converting %d AVI files recursively under %s", len(unique_avi_files), input_dir)
+        report = batch_convert_avi(unique_avi_files, delete_original=False, overwrite=False)
+    else:
+        report = {"total_files": 0, "converted_files": 0, "failed_conversions": 0, "skipped_files": 0}
+
     if "FILE PATH" not in df.columns:
-        return df, {"total_files": 0, "converted_files": 0, "failed_conversions": 0, "skipped_files": 0}
+        report["updated_dataframe_rows"] = 0
+        return df, report
 
     # Identify AVI files by extension or path suffix
     def _is_avi_row(row: pd.Series) -> bool:
@@ -193,40 +210,35 @@ def convert_avi_entries(df: pd.DataFrame, input_dir: Path) -> tuple[pd.DataFrame
         path = str(row.get("FILE PATH", ""))
         return ext == ".avi" or path.lower().endswith(".avi")
 
-    avi_rows = df[df.apply(_is_avi_row, axis=1)].copy()
-    avi_abs_paths = []
-    for _, row in avi_rows.iterrows():
+    def _find_existing_mp4_for_path(src: Path) -> Path | None:
+        preferred = src.with_suffix(".MP4")
+        if preferred.exists():
+            return preferred
+
+        lower = src.with_suffix(".mp4")
+        if lower.exists():
+            return lower
+
+        for candidate in src.parent.glob(f"{src.stem}.*"):
+            if candidate.is_file() and candidate.suffix.lower() == ".mp4":
+                return candidate
+
+        return None
+
+    updated_rows = 0
+    for idx, row in df[df.apply(_is_avi_row, axis=1)].iterrows():
         rel = row.get("FILE PATH")
-        if isinstance(rel, str) and rel.strip():
-            p = (input_dir / rel).resolve()
-            if p.exists():
-                avi_abs_paths.append(p)
+        if not isinstance(rel, str) or not rel.strip():
+            continue
 
-    if not avi_abs_paths:
-        return df, {"total_files": 0, "converted_files": 0, "failed_conversions": 0, "skipped_files": 0}
+        abs_path = (input_dir / rel).resolve()
+        existing_mp4 = _find_existing_mp4_for_path(abs_path)
+        if existing_mp4 is not None:
+            df.at[idx, "FILE PATH"] = existing_mp4.relative_to(input_dir).as_posix()
+            df.at[idx, "FILE EXTENSION"] = existing_mp4.suffix
+            updated_rows += 1
 
-    # Perform batch conversion (do not delete originals by default)
-    report = batch_convert_avi(avi_abs_paths, delete_original=False, overwrite=True)
-
-    # Update dataframe paths for successfully converted files
-    converted_set = set()
-    for src in avi_abs_paths:
-        dst = src.with_suffix(".MP4")
-        # Consider as converted if destination exists (even if reported as skipped due to pre-existence)
-        if dst.exists():
-            converted_set.add(src)
-
-    if converted_set:
-        for idx, row in df.iterrows():
-            rel = row.get("FILE PATH")
-            if not isinstance(rel, str) or not rel.strip():
-                continue
-            abs_path = (input_dir / rel).resolve()
-            if abs_path in converted_set:
-                new_rel = Path(rel).with_suffix(".MP4").as_posix()
-                df.at[idx, "FILE PATH"] = new_rel
-                df.at[idx, "FILE EXTENSION"] = ".MP4"
-
+    report["updated_dataframe_rows"] = updated_rows
     return df, report
 
 
@@ -235,6 +247,81 @@ def _norm_filename(name: str) -> str:
     s = name.lower()
     s = re.sub(r"\s+", " ", s).strip()
     return s
+
+
+def _normalize_whitespace(value: str) -> str:
+    return re.sub(r"\s+", " ", str(value)).strip()
+
+
+def _normalize_site_value(site_value: Any) -> str | None:
+    if pd.isna(site_value):
+        return None
+    site_raw = _normalize_whitespace(str(site_value)).upper()
+    match = re.search(r"SITE\s*0*(\d+)", site_raw)
+    if match:
+        return f"SITE {int(match.group(1))}"
+    return site_raw if site_raw else None
+
+
+def _normalize_cam_value(cam_value: Any) -> str | None:
+    if pd.isna(cam_value):
+        return None
+    cam_raw = _normalize_whitespace(str(cam_value)).upper()
+    compact = re.sub(r"[^A-Z0-9]", "", cam_raw)
+    if compact in {"A", "CAMA"}:
+        return "CAM A"
+    if compact in {"B", "CAMB"}:
+        return "CAM B"
+    if compact.startswith("CAMA"):
+        return "CAM A"
+    if compact.startswith("CAMB"):
+        return "CAM B"
+    return cam_raw if cam_raw else None
+
+
+def _extract_site_cam_from_path(rel: str) -> tuple[str | None, str | None]:
+    parts = Path(rel).parts
+    site: str | None = None
+    cam: str | None = None
+    for part in parts:
+        if site is None:
+            site = _normalize_site_value(part)
+        if cam is None:
+            candidate_cam = _normalize_cam_value(part)
+            if candidate_cam in {"CAM A", "CAM B"}:
+                cam = candidate_cam
+    return site, cam
+
+
+def _is_new_filtered_tree(parts: tuple[str, ...]) -> bool:
+    return any("jaguars filtered" in p.lower() for p in parts)
+
+
+def _is_meaningful_post_cam_dir(part: str) -> bool:
+    token = _normalize_whitespace(part).lower()
+    if token == "":
+        return False
+    if token == "100media":
+        return False
+    if token.isdigit():
+        return False
+    if token.startswith("conf_"):
+        return False
+    return True
+
+
+def _is_jaguar_or_photo_dir(part: str) -> bool:
+    token = _normalize_whitespace(part).lower()
+    return "jaguar" in token or token in {"data photos", "id photos", "photos id"}
+
+
+def _is_jaguar_candidate_in_new_tree(rel: str) -> bool:
+    parts = Path(rel).parts
+    if not _is_new_filtered_tree(parts):
+        return True
+
+    directory_parts = [p for p in parts[:-1] if _is_meaningful_post_cam_dir(p)]
+    return any(_is_jaguar_or_photo_dir(p) for p in directory_parts)
 
 
 def _best_match(name: str, candidates: list[str]) -> tuple[str | None, float]:
@@ -262,26 +349,68 @@ def _index_existing_files(input_dir: Path) -> dict[str, Any]:
     - by_site: site_name -> list of rel paths
     - by_name: filename(lower) -> list of rel paths
     """
-    video_exts = {".mp4", ".mov", ".avi", ".mkv"}
     base = input_dir
     all_files: list[str] = []
     by_site: dict[str, list[str]] = {}
+    by_site_cam: dict[tuple[str, str], list[str]] = {}
     by_name: dict[str, list[str]] = {}
-    sites_root = base / "sites"
-    if not sites_root.exists():
-        return {"all_paths": all_files, "by_site": by_site, "by_name": by_name}
-    for p in sites_root.rglob("*"):
+    by_stem: dict[str, list[str]] = {}
+
+    for p in base.rglob("*"):
         if not p.is_file():
             continue
-        if p.suffix.lower() not in video_exts:
+        if p.suffix.lower() not in MEDIA_EXTENSIONS:
             continue
+
         rel = p.relative_to(base).as_posix()
+        if not _is_jaguar_candidate_in_new_tree(rel):
+            continue
+
         all_files.append(rel)
-        parts = Path(rel).parts
-        site = parts[1] if len(parts) >= 2 else ""
-        by_site.setdefault(site, []).append(rel)
+        site, cam = _extract_site_cam_from_path(rel)
+        if site:
+            by_site.setdefault(site, []).append(rel)
+            if cam:
+                by_site_cam.setdefault((site, cam), []).append(rel)
         by_name.setdefault(Path(rel).name.lower(), []).append(rel)
-    return {"all_paths": all_files, "by_site": by_site, "by_name": by_name}
+        by_stem.setdefault(_norm_filename(Path(rel).stem), []).append(rel)
+
+    return {
+        "all_paths": all_files,
+        "by_site": by_site,
+        "by_site_cam": by_site_cam,
+        "by_name": by_name,
+        "by_stem": by_stem,
+    }
+
+
+def _score_candidate_path(candidate_rel: str, row: pd.Series, file_type: str) -> tuple[int, int]:
+    candidate_site, candidate_cam = _extract_site_cam_from_path(candidate_rel)
+    row_site = _normalize_site_value(row.get("CAMERA TRAP SITE"))
+    row_cam = _normalize_cam_value(row.get("CAM"))
+
+    score = 0
+    if row_site and candidate_site == row_site:
+        score += 4
+    if row_cam and candidate_cam == row_cam:
+        score += 3
+
+    lower = candidate_rel.lower()
+    if "jaguar" in lower:
+        score += 1
+    if file_type == "IMAGE" and any(tag in lower for tag in ["data photos", "id photos", "photos id"]):
+        score += 1
+
+    # tie-breaker: shallower path is preferred
+    depth_penalty = len(Path(candidate_rel).parts)
+    return score, -depth_penalty
+
+
+def _select_best_candidate_path(candidates: list[str], row: pd.Series, file_type: str) -> str | None:
+    if not candidates:
+        return None
+    ranked = sorted(candidates, key=lambda rel: _score_candidate_path(rel, row, file_type), reverse=True)
+    return ranked[0]
 
 
 def auto_match_missing_paths(
@@ -302,7 +431,9 @@ def auto_match_missing_paths(
 
     idx = _index_existing_files(input_dir)
     by_site: dict[str, list[str]] = idx["by_site"]
+    by_site_cam: dict[tuple[str, str], list[str]] = idx["by_site_cam"]
     by_name: dict[str, list[str]] = idx["by_name"]
+    by_stem: dict[str, list[str]] = idx["by_stem"]
     all_paths: list[str] = idx["all_paths"]
 
     def _exists(rel: str) -> bool:
@@ -312,32 +443,54 @@ def auto_match_missing_paths(
             return False
 
     missing_mask = df["FILE PATH"].apply(lambda p: isinstance(p, str) and p.strip() != "" and not _exists(p))
-    missing = df.loc[missing_mask, "FILE PATH"].tolist()
-
     applied = []
     suggestions = []
     unresolved = []
 
-    for rel in missing:
+    for idx_row, row in df.loc[missing_mask].iterrows():
+        rel = str(row.get("FILE PATH"))
         try:
-            parts = Path(rel).parts
-            site = parts[1] if len(parts) >= 2 and parts[0] == "sites" else ""
             filename = Path(rel).name
+            if filename.strip() == "":
+                maybe_file = row.get("ORIGINAL FILE NAME") or row.get("Files Name")
+                filename = str(maybe_file) if pd.notna(maybe_file) else ""
 
-            # Try exact name match first
-            if filename.lower() in by_name:
-                candidates_exact = by_name[filename.lower()]
-                if len(candidates_exact) == 1:
-                    best: str | None = candidates_exact[0]
+            site = _normalize_site_value(row.get("CAMERA TRAP SITE"))
+            cam = _normalize_cam_value(row.get("CAM"))
+            file_type = _get_file_type(filename)
+
+            best: str | None = None
+            best_score = 0.0
+
+            # Prefer exact filename matches first, ranked by site/cam/path score
+            exact_candidates = by_name.get(filename.lower(), [])
+            if exact_candidates:
+                exact_best = _select_best_candidate_path(exact_candidates, row, file_type)
+                if exact_best is not None:
+                    best = exact_best
                     best_score = 1.0
-                else:
-                    best, best_score = _best_match(filename, candidates_exact)
-            # Then try site-specific fuzzy match
-            elif site and site in by_site:
-                best, best_score = _best_match(filename, by_site[site])
-            # Finally try global fuzzy match
-            else:
-                best, best_score = _best_match(filename, all_paths)
+
+            # Then try exact stem matches (handles missing/wrong extensions)
+            stem = _norm_filename(Path(filename).stem)
+            if best is None and stem in by_stem:
+                stem_best = _select_best_candidate_path(by_stem[stem], row, file_type)
+                if stem_best is not None:
+                    best = stem_best
+                    stem_name = _norm_filename(Path(stem_best).stem)
+                    best_score = 0.99 if stem_name == stem else 0.0
+
+            candidate_sets: list[list[str]] = []
+            if site and cam and (site, cam) in by_site_cam:
+                candidate_sets.append(by_site_cam[(site, cam)])
+            if site and site in by_site:
+                candidate_sets.append(by_site[site])
+            candidate_sets.append(all_paths)
+
+            for candidates in candidate_sets:
+                cand_best, cand_score = _best_match(filename, candidates)
+                if cand_best is not None and cand_score > best_score:
+                    best = cand_best
+                    best_score = cand_score
 
             if best and best_score >= accept_threshold:
                 applied.append({"from": rel, "_to_": best, "score": best_score})
@@ -357,7 +510,7 @@ def auto_match_missing_paths(
                 df.at[idx_row, "FILE PATH"] = m[old_path]
 
     report = {
-        "checked_missing": len(missing),
+        "checked_missing": int(missing_mask.sum()),
         "applied": sorted(applied, key=lambda x: (x["score"], x["from"]), reverse=True),
         "num_applied": len(applied),
         "suggestions": sorted(suggestions, key=lambda x: (x["score"], x["from"]), reverse=True),
@@ -373,29 +526,53 @@ def auto_match_missing_paths(
 def _get_file_type(file_name: str) -> str:
     """Determine file type from extension."""
     ext = Path(file_name).suffix.lower()
-    video_exts = {".mp4", ".mov", ".avi"}
-    image_exts = {".jpg", ".jpeg", ".png"}
-    if ext in video_exts:
+    if ext in VIDEO_EXTENSIONS:
         return "VIDEO"
-    elif ext in image_exts:
+    elif ext in IMAGE_EXTENSIONS:
         return "IMAGE"
     else:
         return "UNKNOWN"
 
 
-def _get_file_path(row: pd.Series, file_type: str, input_dir: Path) -> str | None:
+def _get_file_path(row: pd.Series, file_type: str, input_dir: Path, file_index: dict[str, Any] | None = None) -> str | None:
     """Construct expected file path from row metadata."""
-    site = row["CAMERA TRAP SITE"]
-    if pd.isna(site) or not str(site).strip():
+    orig_filename = row["ORIGINAL FILE NAME"]
+    if pd.isna(orig_filename):
         return None
-    site_path: Path = Path("sites") / str(site).strip()
+
+    normalized_file_name = _normalize_whitespace(str(orig_filename))
+    if not normalized_file_name:
+        return None
+
+    if file_index is not None:
+        by_name: dict[str, list[str]] = file_index.get("by_name", {})
+        by_stem: dict[str, list[str]] = file_index.get("by_stem", {})
+
+        exact_candidates = by_name.get(normalized_file_name.lower(), [])
+        if exact_candidates:
+            best = _select_best_candidate_path(exact_candidates, row, file_type)
+            if best is not None:
+                return best
+
+        file_stem = _norm_filename(Path(normalized_file_name).stem)
+        if file_stem and file_stem in by_stem:
+            best = _select_best_candidate_path(by_stem[file_stem], row, file_type)
+            if best is not None:
+                return best
+
+    site = _normalize_site_value(row.get("CAMERA TRAP SITE"))
+    if not site:
+        return None
+    site_path: Path = Path("sites") / site
     if file_type == "VIDEO":
-        cam = row["CAM"]
-        if pd.isna(cam):
-            return None
-        dir_path: Path | None = site_path / ("CAM " + str(cam))
+        cam = _normalize_cam_value(row.get("CAM"))
+        if cam is None:
+            # Keep a non-empty fallback to allow downstream auto-match
+            dir_path = site_path
+        else:
+            dir_path = site_path / cam
     else:  # IMAGE or unknown
-        photos_dir_names = ["ID PHOTOS", "PHOTOS ID"]
+        photos_dir_names = ["ID PHOTOS", "PHOTOS ID", "DATA PHOTOS"]
         dir_path = None
         for pdn in photos_dir_names:
             candidate = input_dir / site_path / pdn
@@ -406,15 +583,13 @@ def _get_file_path(row: pd.Series, file_type: str, input_dir: Path) -> str | Non
             # If none exist, default to first option
             dir_path = site_path / photos_dir_names[0]
 
-    orig_filename = row["ORIGINAL FILE NAME"]
-    if pd.isna(orig_filename):
-        return None
-    file_path = (dir_path / str(orig_filename)).as_posix() if dir_path is not None else None
+    file_path = (dir_path / normalized_file_name).as_posix() if dir_path is not None else None
     return file_path
 
 
 def add_file_metadata(df: pd.DataFrame, input_dir: Path) -> tuple[pd.DataFrame, dict[str, Any]]:
     """Add FILE PATH, FILE TYPE and FILE EXTENSION columns based on the file name extension."""
+    file_index = _index_existing_files(input_dir)
     file_paths = []
     file_type_list = []
     file_extension_list = []
@@ -423,7 +598,7 @@ def add_file_metadata(df: pd.DataFrame, input_dir: Path) -> tuple[pd.DataFrame, 
         file_name = str(row["ORIGINAL FILE NAME"]).strip()
         ext = Path(file_name).suffix.lower()
         file_type = _get_file_type(file_name)
-        file_path = _get_file_path(row, file_type, input_dir)
+        file_path = _get_file_path(row, file_type, input_dir, file_index=file_index)
 
         file_extension_list.append(ext)
         file_type_list.append(file_type)
@@ -633,11 +808,27 @@ def load_df(input_dir: Path, input_csv: Path) -> tuple[pd.DataFrame, dict[str, A
     """Load and validate the input CSV file."""
     csv_path = input_csv if input_csv.exists() else input_dir / input_csv
 
-    try:
-        df = pd.read_csv(csv_path, sep=";", encoding="utf-8")
-    except Exception as e:
-        logger.error("Failed to load CSV: %s", e)
-        raise
+    parse_attempts = [
+        {"sep": ";", "encoding": "utf-8"},
+        {"sep": ",", "encoding": "utf-8"},
+        {"sep": None, "engine": "python", "encoding": "utf-8"},
+    ]
+
+    last_error: Exception | None = None
+    df: pd.DataFrame | None = None
+    for parse_kwargs in parse_attempts:
+        try:
+            candidate = pd.read_csv(csv_path, **parse_kwargs)
+            if len(candidate.columns) > 1:
+                df = candidate
+                break
+            df = candidate
+        except Exception as e:
+            last_error = e
+
+    if df is None:
+        logger.error("Failed to load CSV: %s", last_error)
+        raise RuntimeError(f"Failed to load CSV at {csv_path}") from last_error
 
     columns = df.columns.tolist()
     report = {
@@ -669,13 +860,12 @@ def _run_cleaning_pipeline(
     df, report["split_multifile_sightings"] = split_multifile_sightings(df)
     df, report["checked_duplicates"] = check_duplicates(df)
     df, report["added_file_metadata"] = add_file_metadata(df, input_dir)
+    df, report["converted_avi_to_mp4"] = convert_avi_entries(df, input_dir)
     if auto_match_missing:
         df, report["auto_matched_paths"] = auto_match_missing_paths(
             df, input_dir, accept_threshold=match_threshold, suggest_threshold=suggest_threshold
         )
     df, report["filtered_invalid_paths"] = filter_rows_with_invalid_paths(df, input_dir)
-    # Convert any AVI files to MP4 and update paths before ingest
-    df, report["converted_avi_to_mp4"] = convert_avi_entries(df, input_dir)
     df, report["videos_without_labels"] = find_videos_without_labels(df, input_dir)
 
     return df, report
@@ -704,25 +894,30 @@ def ingest_csv_labels(
     if not input_dir.exists():
         raise FileNotFoundError(f"input_dir not found: {input_dir}")
 
-    csv_path = _as_path(input_dir, Path(input_csv))
+    input_csv_path = Path(input_csv)
+    csv_path = _as_path(input_dir, input_csv_path)
     if not csv_path.exists():
         raise FileNotFoundError(f"labels CSV not found: {csv_path}")
 
     logger.info("Cleaning labels using CSV cleaning pipeline: %s", csv_path)
     cleaned_df, report = _run_cleaning_pipeline(
         input_dir,
-        Path(input_csv),
+        csv_path,
         auto_match_missing=auto_match_missing,
         match_threshold=match_threshold,
         suggest_threshold=suggest_threshold,
     )
 
+    report_path = csv_path.parent
     if output_cleaned_csv is not None:
+        report_path = output_cleaned_csv.parent
         output_cleaned_csv.parent.mkdir(parents=True, exist_ok=True)
         cleaned_df.to_csv(output_cleaned_csv, index=False)
         logger.info("Writing cleaned labels to %s", output_cleaned_csv)
-        if generate_report:
-            write_report(report, output_cleaned_csv.parent / "cleaning_report.json")
+
+    if generate_report:
+        report["output_cleaned_csv"] = str(output_cleaned_csv)
+        write_report(report, report_path / "cleaning_report.json")
 
     # Create or load grouped dataset with image and video slices
     dataset = get_or_create_dataset(dataset_name)
@@ -762,8 +957,24 @@ def ingest_csv_labels(
         if str(abs_path) in existing_filepaths:
             continue
 
-        file_type = str(row.get("FILE TYPE") or "UNKNOWN").upper()
-        slice_name = VIDEO_GROUP_SLICE if file_type == "VIDEO" else DEFAULT_GROUP_SLICE
+        file_suffix = abs_path.suffix.lower()
+        if file_suffix in VIDEO_EXTENSIONS:
+            file_type = "VIDEO"
+            slice_name = VIDEO_GROUP_SLICE
+        elif file_suffix in IMAGE_EXTENSIONS:
+            file_type = "IMAGE"
+            slice_name = DEFAULT_GROUP_SLICE
+        else:
+            fallback_type = str(row.get("FILE TYPE") or "UNKNOWN").upper()
+            if fallback_type == "VIDEO":
+                file_type = "VIDEO"
+                slice_name = VIDEO_GROUP_SLICE
+            elif fallback_type == "IMAGE":
+                file_type = "IMAGE"
+                slice_name = DEFAULT_GROUP_SLICE
+            else:
+                logger.warning("Skipping unsupported media file: %s", abs_path)
+                continue
 
         # Each CSV row gets its own group ID (UUID-based to ensure uniqueness)
         group_id = str(uuid.uuid4())
@@ -799,7 +1010,7 @@ def ingest_csv_labels(
         # Preserve useful legacy fields for traceability
         sample["raw_data_path"] = str(input_dir)
         sample["file_path"] = str(rel_path)
-        sample["file_type"] = str(file_type)
+        sample["file_type"] = file_type
         sample["file_extension"] = str(row.get("FILE EXTENSION")) if pd.notna(row.get("FILE EXTENSION")) else None
         sample["original_file_name"] = str(row.get("ORIGINAL FILE NAME")) if pd.notna(row.get("ORIGINAL FILE NAME")) else None
 

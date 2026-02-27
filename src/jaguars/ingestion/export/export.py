@@ -6,6 +6,9 @@ Exports dataset to data directory and to huggingface.
 import argparse
 import json
 import logging
+import os
+import tempfile
+import time
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -140,16 +143,49 @@ def _export_variant_to_huggingface(
     view: fo.DatasetView,
     repo_name: str,
 ) -> None:
-    from fiftyone.utils.huggingface import push_to_hub
-    from huggingface_hub import login
+    from huggingface_hub import HfApi, login
 
-    login()
-    push_to_hub(
-        view,
-        repo_name=repo_name,
-        dataset_type=fo.types.FiftyOneDataset,
-        private=True,
-    )
+    hf_token = os.getenv("HF_TOKEN")
+    if hf_token:
+        login(token=hf_token)
+    else:
+        login()
+
+    api = HfApi(token=hf_token)
+    api.create_repo(repo_id=repo_name, repo_type="dataset", private=True, exist_ok=True)
+
+    with tempfile.TemporaryDirectory(prefix="jid_hf_export_") as tmpdir:
+        export_dir = Path(tmpdir) / "fiftyone_dataset"
+        logger.info("Exporting view to temporary directory for HF upload: %s", export_dir)
+        view.export(
+            export_dir=str(export_dir),
+            dataset_type=fo.types.FiftyOneDataset,
+            overwrite=True,
+        )
+
+        max_retries = 4
+        for attempt in range(1, max_retries + 1):
+            try:
+                logger.info("Uploading dataset folder to HF (attempt %d/%d)...", attempt, max_retries)
+                api.upload_large_folder(
+                    repo_id=repo_name,
+                    repo_type="dataset",
+                    folder_path=str(export_dir),
+                )
+                logger.info("Successfully uploaded dataset to HF repo '%s'", repo_name)
+                return
+            except Exception as exc:
+                if attempt >= max_retries:
+                    raise
+
+                wait_seconds = 30 * attempt
+                logger.warning(
+                    "HF upload attempt %d failed: %s. Retrying in %d seconds...",
+                    attempt,
+                    exc,
+                    wait_seconds,
+                )
+                time.sleep(wait_seconds)
 
 
 def run_processing(

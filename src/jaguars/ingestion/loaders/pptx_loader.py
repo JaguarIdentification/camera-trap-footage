@@ -17,6 +17,7 @@ Usage (via CLI):
 """
 
 import argparse
+import hashlib
 import io
 import json
 import logging
@@ -196,23 +197,33 @@ def ingest_pptx_slides(
             out_path.write_bytes(blob)
 
     # Optionally write the legacy CSV output
+    report_dir = pptx_path.parent
     if output_csv is not None:
+        report_dir = output_csv.parent
         output_csv.parent.mkdir(parents=True, exist_ok=True)
         df.to_csv(output_csv, index=False)
         logger.info("Writing extracted labels to %s", output_csv)
-        if generate_report:
-            report_path = output_csv.parent / "pptx_extraction_report.json"
-            with open(report_path, "w") as f:
-                json.dump(report, f, indent=4)
-            logger.info("Writing processing report to %s", report_path)
+
+    if generate_report:
+        report_path = report_dir / f"pptx_extraction_report_{pptx_path.stem}.json"
+        with open(report_path, "w") as f:
+            json.dump(report, f, indent=4)
+        logger.info("Writing processing report to %s", report_path)
 
     existing_uids = set()
+    existing_hashes = set()
     try:
         for v in dataset.values("pptx_uid"):
             if v:
                 existing_uids.add(str(v))
     except Exception:
         existing_uids = set()
+    try:
+        for v in dataset.values("pptx_image_sha1"):
+            if v:
+                existing_hashes.add(str(v))
+    except Exception:
+        existing_hashes = set()
 
     # Ingest into FiftyOne (one sample per extracted image)
     new_samples: list[fo.Sample] = []
@@ -222,6 +233,11 @@ def ingest_pptx_slides(
 
         pptx_uid = f"{pptx_path.resolve().as_posix()}|{img_filename}"
         if pptx_uid in existing_uids:
+            continue
+
+        image_blob = blobs.get(str(img_filename))
+        image_sha1 = hashlib.sha1(image_blob).hexdigest() if image_blob is not None else None
+        if image_sha1 and image_sha1 in existing_hashes:
             continue
 
         # Each image gets its own group ID in the 'image' slice
@@ -235,6 +251,7 @@ def ingest_pptx_slides(
         sample["source"] = "pptx_camera_trap_guide_17_11_2025"
         sample["pptx_source"] = pptx_path.as_posix()
         sample["pptx_uid"] = pptx_uid
+        sample["pptx_image_sha1"] = image_sha1
         m = re.match(r"^slide_(\d+)_img_\d+\.[A-Za-z0-9]+$", str(img_filename))
         sample["slide_num"] = int(m.group(1)) if m else None
 
@@ -270,6 +287,8 @@ def ingest_pptx_slides(
             sample[detections_field] = dets
 
         new_samples.append(sample)
+        if image_sha1:
+            existing_hashes.add(image_sha1)
 
     if new_samples:
         dataset.add_samples(new_samples)
