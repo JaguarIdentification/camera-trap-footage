@@ -4,6 +4,8 @@ This module defines all configuration dataclasses for training, evaluation,
 model architecture, and dataset loading.
 """
 
+from __future__ import annotations
+
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal

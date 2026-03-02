@@ -57,6 +57,37 @@ def get_segmented_bbox_image(sample):
     return PILImage.fromarray(image_np)
 
 
+def remove_jaguar_from_image(sample):
+    image = PILImage.open(sample.filepath).convert("RGBA")
+    img_w, img_h = image.size
+
+    detections = getattr(sample.sam3_segmentations, "detections", None)
+    if not detections:
+        print("No detections found.")
+        return None
+
+    detection = detections[0]
+    mask = getattr(detection, "mask", None)
+    bbox = getattr(detection, "bounding_box", None)
+
+    if mask is None:
+        print("Missing mask.")
+        return None
+
+    # FiftyOne stores SAM masks at the bbox dimensions; resize to full image size
+    full_mask = np.array(
+        PILImage.fromarray((mask * 255).astype(np.uint8))
+        .resize((img_w, img_h), resample=PILImage.NEAREST)
+    ).astype(bool)
+
+    image_np = np.array(image)
+
+    # Make jaguar pixels transparent
+    image_np[full_mask] = [0, 0, 0, 0]
+
+    return PILImage.fromarray(image_np)
+
+
 import cv2
 import numpy as np
 from PIL import Image as PILImage
@@ -75,7 +106,7 @@ def canny_edge_detection(
     if image_path is not None:
         image = cv2.imread(image_path)
     else:
-        if isinstance(image, PILImage):
+        if isinstance(image, PILImage.Image):
             image = np.array(image)
         if image.shape[-1] == 4:  # RGBA
             image = cv2.cvtColor(image, cv2.COLOR_RGBA2RGB)
@@ -90,3 +121,5 @@ def canny_edge_detection(
     edges = cv2.Canny(blurred, low_threshold, high_threshold)
 
     return PILImage.fromarray(edges)
+
+
