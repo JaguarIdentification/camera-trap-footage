@@ -163,34 +163,42 @@ def prepare_dataset(
     splits: list[str] = []
 
     skipped = 0
+    processed = 0
 
     for sample in tqdm(dataset, desc="Preparing images"):
+        processed += 1
+
         # --- label ----------------------------------------------------------
         label_obj = getattr(sample, label_field, None)
         if label_obj is None:
             skipped += 1
-            continue
-        label = label_obj.label if hasattr(label_obj, "label") else str(label_obj)
+        else:
+            label = label_obj.label if hasattr(label_obj, "label") else str(label_obj)
 
-        # --- split ----------------------------------------------------------
-        split = getattr(sample, split_field, "train") or "train"
+            # --- split ----------------------------------------------------------
+            split = getattr(sample, split_field, "train") or "train"
 
-        # --- segmented jaguar -----------------------------------------------
-        seg_img = get_segmented_bbox_image(sample)
-        if seg_img is None:
-            skipped += 1
-            continue
+            # --- segmented jaguar -----------------------------------------------
+            seg_img = get_segmented_bbox_image(sample)
+            if seg_img is None:
+                skipped += 1
+            else:
+                # --- background only ------------------------------------------------
+                bg_img = remove_jaguar_from_image(sample)
+                if bg_img is None:
+                    skipped += 1
+                else:
+                    segmented_images.append(_pil_to_rgb(seg_img))
+                    background_images.append(_pil_to_rgb(bg_img))
+                    labels.append(label)
+                    splits.append(split)
 
-        # --- background only ------------------------------------------------
-        bg_img = remove_jaguar_from_image(sample)
-        if bg_img is None:
-            skipped += 1
-            continue
-
-        segmented_images.append(_pil_to_rgb(seg_img))
-        background_images.append(_pil_to_rgb(bg_img))
-        labels.append(label)
-        splits.append(split)
+        if processed % 1000 == 0:
+            logger.info(
+                "  [%d images processed] %d skipped so far (no detections/mask)",
+                processed,
+                skipped,
+            )
 
     logger.info(
         "Dataset prepared: %d samples, %d skipped, %d unique labels",

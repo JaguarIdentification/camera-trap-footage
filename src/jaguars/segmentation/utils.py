@@ -19,7 +19,6 @@ def get_segmented_bbox_image(sample):
 
     detections = getattr(sample.sam3_segmentations, "detections", None)
     if not detections:
-        print("No detections found.")
         return None
 
     detection = detections[0]
@@ -27,7 +26,6 @@ def get_segmented_bbox_image(sample):
     bbox = getattr(detection, "bounding_box", None)
 
     if mask is None or bbox is None:
-        print("Missing mask or bounding box.")
         return None
 
     # Convert normalized bbox → pixel coords
@@ -56,6 +54,16 @@ def get_segmented_bbox_image(sample):
 
     return PILImage.fromarray(image_np)
 
+def has_segmented_jaguar(sample):
+    detections = getattr(sample.sam3_segmentations, "detections", None)
+    if not detections:
+        return False
+
+    detection = detections[0]
+    mask = getattr(detection, "mask", None)
+
+    return mask is not None
+
 
 def remove_jaguar_from_image(sample):
     image = PILImage.open(sample.filepath).convert("RGBA")
@@ -63,7 +71,6 @@ def remove_jaguar_from_image(sample):
 
     detections = getattr(sample.sam3_segmentations, "detections", None)
     if not detections:
-        print("No detections found.")
         return None
 
     detection = detections[0]
@@ -71,7 +78,6 @@ def remove_jaguar_from_image(sample):
     bbox = getattr(detection, "bounding_box", None)
 
     if mask is None:
-        print("Missing mask.")
         return None
 
     # FiftyOne stores SAM masks at the bbox dimensions; resize to full image size
