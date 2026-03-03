@@ -38,11 +38,11 @@ def compute_comprehensive_metrics(
     val_embeddings: np.ndarray,
     val_labels: np.ndarray,
     train_labels: np.ndarray | None,
+    all_labels: np.ndarray | None,
     label_encoder: LabelEncoder,
     device: str | None = None,
     max_cmc_rank: int = 50,
-    min_train_samples: int | None = None,
-    min_val_samples: int | None = None,
+    min_total_samples_for_filtered: int | None = 9,
     use_embeddings_directly: bool = False,
 ) -> dict[str, Any]:
     """Compute comprehensive evaluation metrics efficiently.
@@ -50,21 +50,19 @@ def compute_comprehensive_metrics(
     Computes similarity matrix once, then derives:
     - Sample-level mAP (micro-average)
     - Identity-balanced mAP (macro-average across identities)
-    - Closed-set mAP (identities with sufficient samples in train and val)
-    - CMC curve (Cumulative Matching Characteristics)
     - CMC@k metrics (k=1,5,10,20)
-    - Training-sample-stratified mAP (mAP by number of training samples)
+    - Filtered mAP/CMC@k for identities with at least N total samples across train/val/test
 
     Args:
         model: Trained model (can be None if use_embeddings_directly=True)
         val_embeddings: Validation embeddings (num_samples, embedding_dim)
         val_labels: Validation labels (num_samples,)
-        train_labels: Training labels (for stratification), or None
+        train_labels: Training labels, or None
+        all_labels: Labels across all splits (train/val/test), or None
         label_encoder: Label encoder
         device: Device to run on
         max_cmc_rank: Maximum rank for CMC curve
-        min_train_samples: Minimum training samples for closed-set evaluation (None = no filter)
-        min_val_samples: Minimum validation samples for closed-set evaluation (None = no filter)
+        min_total_samples_for_filtered: Minimum total identity support across all splits
         use_embeddings_directly: If True, use val_embeddings directly without passing through model
 
     Returns:
@@ -90,191 +88,118 @@ def compute_comprehensive_metrics(
     sim_matrix = cosine_similarity(finetuned_emb)
     np.fill_diagonal(sim_matrix, -1)  # Exclude self-similarity
 
-    # Initialize metric accumulators
-    query_aps = {}  # query_idx -> (label, ap)
-    cmc_hits = np.zeros(max_cmc_rank)  # Count of queries where match is in top-k
-    num_queries = 0
+    def _compute_map_and_cmc(
+        labels: np.ndarray,
+        matrix: np.ndarray,
+        eval_indices: np.ndarray,
+    ) -> tuple[float, float, dict[str, float], int, int]:
+        """Compute sample mAP, identity-balanced mAP, and CMC@k for selected indices."""
+        if len(eval_indices) == 0:
+            zero_cmc = {"cmc@1": 0.0, "cmc@5": 0.0, "cmc@10": 0.0, "cmc@20": 0.0}
+            return 0.0, 0.0, zero_cmc, 0, 0
 
-    # Compute metrics for each query
-    for query_idx in range(len(val_labels)):
-        query_label = val_labels[query_idx]
+        query_aps: dict[int, tuple[int, float]] = {}
+        cmc_hits = np.zeros(max_cmc_rank)
+        num_queries = 0
 
-        # Get similarities to all gallery images (excluding self)
-        similarities = sim_matrix[query_idx]
+        for query_idx in eval_indices:
+            query_label = labels[query_idx]
 
-        # True labels for gallery
-        gallery_labels = val_labels.copy()
-        is_match = (gallery_labels == query_label).astype(int)
-        is_match[query_idx] = 0  # Exclude self
+            gallery_indices = eval_indices[eval_indices != query_idx]
+            if len(gallery_indices) == 0:
+                continue
 
-        # Sort by similarity descending
-        sorted_indices = np.argsort(-similarities)
-        sorted_matches = is_match[sorted_indices]
+            similarities = matrix[query_idx, gallery_indices]
+            matches = (labels[gallery_indices] == query_label).astype(int)
 
-        # Compute Average Precision
-        n_positives = sorted_matches.sum()
-        if n_positives == 0:
-            continue
+            sorted_indices = np.argsort(-similarities)
+            sorted_matches = matches[sorted_indices]
 
-        cumsum = np.cumsum(sorted_matches)
-        precision_at_k = cumsum / np.arange(1, len(sorted_matches) + 1)
-        ap = np.sum(precision_at_k * sorted_matches) / n_positives
+            n_positives = sorted_matches.sum()
+            if n_positives == 0:
+                continue
 
-        query_aps[query_idx] = (query_label, ap)
+            cumsum = np.cumsum(sorted_matches)
+            precision_at_k = cumsum / np.arange(1, len(sorted_matches) + 1)
+            ap = float(np.sum(precision_at_k * sorted_matches) / n_positives)
+            query_aps[int(query_idx)] = (int(query_label), ap)
 
-        # Update CMC: find first correct match
-        first_match_idx = np.where(sorted_matches)[0]
-        if len(first_match_idx) > 0:
-            first_match_rank = first_match_idx[0]
-            # Mark all ranks >= first_match_rank as hits
-            cmc_hits[first_match_rank:] += 1
-        num_queries += 1
+            first_match_idx = np.where(sorted_matches)[0]
+            if len(first_match_idx) > 0:
+                first_match_rank = int(first_match_idx[0])
+                if first_match_rank < max_cmc_rank:
+                    cmc_hits[first_match_rank:] += 1
+            num_queries += 1
 
-    # 1. Sample-level mAP (micro-average)
-    sample_map = float(np.mean([ap for _, ap in query_aps.values()]))
+        if num_queries == 0 or not query_aps:
+            zero_cmc = {"cmc@1": 0.0, "cmc@5": 0.0, "cmc@10": 0.0, "cmc@20": 0.0}
+            return 0.0, 0.0, zero_cmc, 0, 0
 
-    # 2. Identity-balanced mAP (macro-average across identities)
-    identity_aps: dict[int, list[float]] = {}
-    for _query_idx, (label, ap) in query_aps.items():
-        if label not in identity_aps:
-            identity_aps[label] = []
-        identity_aps[label].append(ap)
+        sample_map = float(np.mean([ap for _, ap in query_aps.values()]))
 
-    identity_mean_aps = [np.mean(aps) for aps in identity_aps.values()]
-    identity_balanced_map = float(np.mean(identity_mean_aps))
+        identity_aps: dict[int, list[float]] = {}
+        for _query_idx, (label, ap) in query_aps.items():
+            if label not in identity_aps:
+                identity_aps[label] = []
+            identity_aps[label].append(ap)
 
-    # 2b. Closed-set mAP (filter to identities with sufficient samples)
-    closed_set_map = None
-    closed_set_identities = []
-    if min_train_samples is not None or min_val_samples is not None:
-        # Count samples per identity in train and val
-        train_counts = {}
-        if train_labels is not None:
-            unique_train, counts = np.unique(train_labels, return_counts=True)
-            for label, count in zip(unique_train, counts):
-                train_counts[label] = int(count)
-        
-        val_counts = {}
-        unique_val, counts = np.unique(val_labels, return_counts=True)
-        for label, count in zip(unique_val, counts):
-            val_counts[label] = int(count)
-        
-        # Filter identities based on minimum sample requirements
-        for identity in identity_aps.keys():
-            n_train = train_counts.get(identity, 0)
-            n_val = val_counts.get(identity, 0)
-            
-            meets_criteria = True
-            if min_train_samples is not None and n_train < min_train_samples:
-                meets_criteria = False
-            if min_val_samples is not None and n_val < min_val_samples:
-                meets_criteria = False
-            
-            if meets_criteria:
-                closed_set_identities.append(identity)
-        
-        # Compute closed-set mAP
-        if len(closed_set_identities) > 0:
-            closed_set_mean_aps = [np.mean(identity_aps[identity]) for identity in closed_set_identities]
-            closed_set_map = float(np.mean(closed_set_mean_aps))
+        identity_balanced_map = float(np.mean([np.mean(aps) for aps in identity_aps.values()]))
+        cmc_curve = cmc_hits / num_queries
+        cmc_at_k = {
+            "cmc@1": float(cmc_curve[0]) if len(cmc_curve) > 0 else 0.0,
+            "cmc@5": float(cmc_curve[4]) if len(cmc_curve) > 4 else 0.0,
+            "cmc@10": float(cmc_curve[9]) if len(cmc_curve) > 9 else 0.0,
+            "cmc@20": float(cmc_curve[19]) if len(cmc_curve) > 19 else 0.0,
+        }
+        return sample_map, identity_balanced_map, cmc_at_k, num_queries, len(identity_aps)
 
-    # 3. CMC curve and metrics
-    cmc_curve = (cmc_hits / num_queries).tolist() if num_queries > 0 else [0.0] * max_cmc_rank
-    cmc_at_k = {
-        "cmc@1": cmc_curve[0] if len(cmc_curve) > 0 else 0.0,
-        "cmc@5": cmc_curve[4] if len(cmc_curve) > 4 else 0.0,
-        "cmc@10": cmc_curve[9] if len(cmc_curve) > 9 else 0.0,
-        "cmc@20": cmc_curve[19] if len(cmc_curve) > 19 else 0.0,
-    }
+    eval_all = np.arange(len(val_labels))
+    sample_map, identity_balanced_map, cmc_at_k, num_queries, num_identities = _compute_map_and_cmc(
+        labels=val_labels,
+        matrix=sim_matrix,
+        eval_indices=eval_all,
+    )
 
-    # 4. Training-sample-stratified mAP
-    stratified_map = {}
-    if train_labels is not None:
-        # Count training samples per identity
-        train_counts = {}
-        unique_train, counts = np.unique(train_labels, return_counts=True)
-        for label, count in zip(unique_train, counts):
-            train_counts[label] = int(count)
-        
-        # Count validation samples per identity
-        val_counts = {}
-        unique_val, counts = np.unique(val_labels, return_counts=True)
-        for label, count in zip(unique_val, counts):
-            val_counts[label] = int(count)
-
-        # Group validation queries by training sample count
-        # Bins define upper bounds (exclusive): [1, 3) → "1-2", [3, 5) → "3-4", etc.
-        strata_bins = [1, 3, 5, 10, 20, 50, float("inf")]
-        strata_names = ["0", "1-2", "3-4", "5-9", "10-19", "20-49", "50+"]
-        strata_aps: dict[str, list[float]] = {name: [] for name in strata_names}
-        
-        # Also stratify by both train and val counts
-        joint_strata_bins = [3, 5, 10, float("inf")]  # Upper boundaries: <3, <5, <10, >=10
-        joint_strata_names = ["0-2", "3-4", "5-9", "10+"]
-        joint_strata_aps: dict[str, list[float]] = {}
-        for train_name in joint_strata_names:
-            for val_name in joint_strata_names:
-                key = f"train_{train_name}_val_{val_name}"
-                joint_strata_aps[key] = []
-
-        for query_idx, (label, ap) in query_aps.items():
-            n_train = train_counts.get(label, 0)
-            n_val = val_counts.get(label, 0)
-            
-            # Find training sample stratum
-            stratum_idx = len(strata_names) - 1  # Default to last bin
-            for i, upper_bound in enumerate(strata_bins):
-                if n_train < upper_bound:
-                    stratum_idx = i
-                    break
-            strata_aps[strata_names[stratum_idx]].append(ap)
-            
-            # Find joint stratum (train x val)
-            train_stratum_idx = len(joint_strata_names) - 1  # Default to last bin
-            for i, upper_bound in enumerate(joint_strata_bins):
-                if n_train < upper_bound:
-                    train_stratum_idx = i
-                    break
-            
-            val_stratum_idx = len(joint_strata_names) - 1  # Default to last bin
-            for i, upper_bound in enumerate(joint_strata_bins):
-                if n_val < upper_bound:
-                    val_stratum_idx = i
-                    break
-            
-            key = f"train_{joint_strata_names[train_stratum_idx]}_val_{joint_strata_names[val_stratum_idx]}"
-            joint_strata_aps[key].append(ap)
-
-        # Compute mean for each stratum (training only)
-        for stratum_name in strata_names:
-            aps = strata_aps[stratum_name]
-            if len(aps) > 0:
-                stratified_map[f"map_train_{stratum_name}"] = float(np.mean(aps))
+    filtered_metrics: dict[str, Any] = {}
+    if min_total_samples_for_filtered is not None:
+        total_labels = all_labels
+        if total_labels is None:
+            if train_labels is not None:
+                total_labels = np.concatenate([train_labels, val_labels])
             else:
-                stratified_map[f"map_train_{stratum_name}"] = None
-        
-        # Compute mean for each joint stratum
-        for key, aps in joint_strata_aps.items():
-            if len(aps) > 0:
-                stratified_map[f"map_{key}"] = float(np.mean(aps))
-            else:
-                stratified_map[f"map_{key}"] = None
+                total_labels = val_labels
+
+        unique_labels, label_counts = np.unique(total_labels, return_counts=True)
+        eligible_labels = set(unique_labels[label_counts >= min_total_samples_for_filtered].tolist())
+
+        eval_filtered = np.array([idx for idx, lab in enumerate(val_labels) if lab in eligible_labels], dtype=int)
+        filtered_map, _filtered_ib_map_unused, filtered_cmc, filtered_queries, filtered_identities = _compute_map_and_cmc(
+            labels=val_labels,
+            matrix=sim_matrix,
+            eval_indices=eval_filtered,
+        )
+
+        suffix = f"min_total_{min_total_samples_for_filtered}"
+        filtered_metrics = {
+            f"map_{suffix}": filtered_map,
+            f"cmc_{suffix}@1": filtered_cmc["cmc@1"],
+            f"cmc_{suffix}@5": filtered_cmc["cmc@5"],
+            f"cmc_{suffix}@10": filtered_cmc["cmc@10"],
+            f"cmc_{suffix}@20": filtered_cmc["cmc@20"],
+            f"num_queries_{suffix}": filtered_queries,
+            f"num_identities_{suffix}": filtered_identities,
+            "min_total_samples_threshold": min_total_samples_for_filtered,
+        }
 
     # Prepare results
     results = {
-        "map": sample_map,  # Sample-level mAP (backward compatible)
+        "map": sample_map,
         "identity_balanced_map": identity_balanced_map,
-        "cmc_curve": cmc_curve,
         **cmc_at_k,
-        **stratified_map,
+        **filtered_metrics,
         "num_queries": num_queries,
-        "num_identities": len(identity_aps),
+        "num_identities": num_identities,
     }
-    
-    # Add closed-set metrics if computed
-    if closed_set_map is not None:
-        results["closed_set_map"] = closed_set_map
-        results["closed_set_num_identities"] = len(closed_set_identities)
 
     return results
 
@@ -302,6 +227,7 @@ def compute_validation_map(
         val_embeddings=val_embeddings,
         val_labels=val_labels,
         train_labels=None,
+        all_labels=val_labels,
         label_encoder=label_encoder,
         device=device,
         max_cmc_rank=50,
@@ -516,14 +442,28 @@ def run_processing(
     
     elif baseline_mode == "backbone_only":
         logger_instance.info("Running backbone-only evaluation (no fine-tuning)")
-        
-        # Load backbone and extract embeddings
-        backbone = get_backbone(config.backbone, device)
-        backbone.eval()
-        
-        logger_instance.info("Extracting backbone embeddings...")
-        test_embeddings = backbone.extract_embeddings(test_data.image_paths, device, desc="Test embeddings")
-        train_embeddings = backbone.extract_embeddings(train_data.image_paths, device, desc="Train embeddings")
+
+        # Reuse cached embeddings when available; fall back to backbone extraction otherwise
+        backbone = None
+
+        if test_data.embeddings is not None:
+            logger_instance.info("Using pre-computed test embeddings")
+            test_embeddings = test_data.embeddings
+        else:
+            logger_instance.info("Extracting test embeddings with backbone...")
+            backbone = get_backbone(config.backbone, device)
+            backbone.eval()
+            test_embeddings = backbone.extract_embeddings(test_data.image_paths, device, desc="Test embeddings")
+
+        if train_data.embeddings is not None:
+            logger_instance.info("Using pre-computed train embeddings")
+            train_embeddings = train_data.embeddings
+        else:
+            logger_instance.info("Extracting train embeddings with backbone...")
+            if backbone is None:
+                backbone = get_backbone(config.backbone, device)
+                backbone.eval()
+            train_embeddings = backbone.extract_embeddings(train_data.image_paths, device, desc="Train embeddings")
     
     else:
         # Standard evaluation: extract or load embeddings
@@ -573,21 +513,25 @@ def run_processing(
             val_embeddings=test_embeddings,
             val_labels=test_data.labels_encoded,
             train_labels=train_data.labels_encoded,
+            all_labels=dataset_metadata.labels_encoded,
             label_encoder=dataset_metadata.label_encoder,
             device=device,
             max_cmc_rank=50,
-            min_train_samples=3,  # Closed-set: at least 3 training samples
-            min_val_samples=3,    # Closed-set: at least 3 test samples
+            min_total_samples_for_filtered=9,
             use_embeddings_directly=use_embeddings_directly,
         )
         
         # Log key metrics
         logger_instance.info(f"Sample-level mAP: {comprehensive_metrics['map']:.4f}")
         logger_instance.info(f"Identity-balanced mAP: {comprehensive_metrics['identity_balanced_map']:.4f}")
-        if "closed_set_map" in comprehensive_metrics:
+        if "map_min_total_9" in comprehensive_metrics:
             logger_instance.info(
-                f"Closed-set mAP (≥3 train & test): {comprehensive_metrics['closed_set_map']:.4f} "
-                f"({comprehensive_metrics['closed_set_num_identities']}/{comprehensive_metrics['num_identities']} identities)"
+                f"Filtered mAP (>=9 total samples): {comprehensive_metrics['map_min_total_9']:.4f} "
+                f"({comprehensive_metrics['num_identities_min_total_9']}/{comprehensive_metrics['num_identities']} identities)"
+            )
+            logger_instance.info(
+                f"Filtered CMC@1: {comprehensive_metrics['cmc_min_total_9@1']:.4f}, "
+                f"CMC@5: {comprehensive_metrics['cmc_min_total_9@5']:.4f}"
             )
         logger_instance.info(f"CMC@1: {comprehensive_metrics['cmc@1']:.4f}")
         logger_instance.info(f"CMC@5: {comprehensive_metrics['cmc@5']:.4f}")

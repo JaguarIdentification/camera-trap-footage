@@ -82,7 +82,7 @@ The Makefile includes a `data` target that runs `dvc pull` for convenience.
 
 ## Further Resources
 - [Huggingface Jaguar Dataset](https://huggingface.co/datasets/jaguaridentification/jaguars)
-- [Camera Trap Data](https://drive.google.com/drive/folders/1Ztn79beQBbZAKcn_EdCT6QDsroFpqUq-)
+- [Camera Trap Data](https://drive.google.com/drive/folders/1Mnc0e3pL4ib3rnDQWZB48oomxj6P8rF_)
 - [JaguarIdentification ReidentificationModels GitHub](https://github.com/JaguarIdentification/ReidentificationModels)
 - [Notebook to perform embeddings-based exploration and segmentation on FiftyOne](https://github.com/andandandand/practical-computer-vision/blob/main/notebooks/Jaguar_Identification_Embeddings_Based_Exploration.ipynb)
 

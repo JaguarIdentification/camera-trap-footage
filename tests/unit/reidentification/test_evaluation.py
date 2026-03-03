@@ -8,6 +8,7 @@ from sklearn.preprocessing import LabelEncoder
 from jaguars.reidentification.config import ModelConfig
 from jaguars.reidentification.evaluation.evaluation import (
     compute_cmc,
+    compute_comprehensive_metrics,
     compute_validation_map,
 )
 from jaguars.reidentification.model import ArcFaceModel
@@ -207,3 +208,56 @@ def test_validation_map_consistency() -> None:
 
     # Should be identical (deterministic in eval mode)
     assert map1 == map2
+
+
+def test_compute_comprehensive_metrics_core_and_filtered() -> None:
+    """Test compact metric set including >=9 total-samples filtered metrics."""
+    np.random.seed(7)
+
+    # 18 validation samples: class 0 (10), class 1 (8)
+    # Only class 0 should satisfy >=9 total support when combined with train labels
+    val_embeddings = np.random.randn(18, 32).astype(np.float32)
+    val_labels = np.array([0] * 10 + [1] * 8)
+
+    # Train labels add support: class 0 gets +2 (total 12), class 1 gets +0 (total 8)
+    train_labels = np.array([0, 0], dtype=int)
+    all_labels = np.concatenate([train_labels, val_labels])
+
+    label_encoder = LabelEncoder()
+    label_encoder.fit(all_labels)
+
+    metrics = compute_comprehensive_metrics(
+        model=None,
+        val_embeddings=val_embeddings,
+        val_labels=val_labels,
+        train_labels=train_labels,
+        all_labels=all_labels,
+        label_encoder=label_encoder,
+        use_embeddings_directly=True,
+        min_total_samples_for_filtered=9,
+    )
+
+    required = {
+        "map",
+        "identity_balanced_map",
+        "cmc@1",
+        "cmc@5",
+        "cmc@10",
+        "cmc@20",
+        "map_min_total_9",
+        "cmc_min_total_9@1",
+        "cmc_min_total_9@5",
+        "cmc_min_total_9@10",
+        "cmc_min_total_9@20",
+        "num_identities_min_total_9",
+    }
+    assert required.issubset(metrics.keys())
+
+    # No legacy keys in compact output
+    assert "closed_set_map" not in metrics
+    assert "cmc_curve" not in metrics
+
+    # Value ranges
+    for key in ["map", "identity_balanced_map", "map_min_total_9", "cmc@1", "cmc@5", "cmc@10", "cmc@20"]:
+        assert isinstance(metrics[key], float)
+        assert 0.0 <= metrics[key] <= 1.0

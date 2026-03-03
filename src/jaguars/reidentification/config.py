@@ -95,6 +95,7 @@ class TrainingConfig:
     focal_alpha: float | None = None
     multi_margin_p: int = 1
     multi_margin_margin: float = 1.0
+    num_subcenters: int = 2
 
     # Triplet loss config
     triplet_margin: float = 0.3

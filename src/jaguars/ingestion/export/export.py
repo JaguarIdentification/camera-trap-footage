@@ -46,6 +46,7 @@ def _get_variant_view(
     variant: str,
     segmentation_field: str,
     dedup_field: str,
+    filtered_tags: Iterable[str],
 ) -> fo.DatasetView:
     """Get dataset view for a specific variant.
 
@@ -87,6 +88,10 @@ def _get_variant_view(
             view = view.match(F(dedup_field) != True)
         else:
             logger.warning("Dedup field '%s' not found; returning unfiltered view", dedup_field)
+
+    # Exclude samples tagged by segmentation quality/count filters
+    for tag in filtered_tags:
+        view = view.match_tags(tag, bool=False)
 
     return view
 
@@ -196,6 +201,7 @@ def run_processing(
     export_base_dir: Path | None = None,
     segmentation_field: str = "sam3_segmentations",
     dedup_field: str = "is_duplicate",
+    filtered_tags: Iterable[str] | None = None,
     summary_location: Path | None = None,
     dry_run: bool = False,
     verbose: bool = False,
@@ -217,6 +223,7 @@ def run_processing(
         export_base_dir: Base directory for disk exports
         segmentation_field: Field name for segmentation detections
         dedup_field: Field name marking duplicates
+        filtered_tags: Tags to exclude from non-master variants
         summary_location: Path to write summary JSON
         dry_run: If True, only log what would be done
         verbose: Enable verbose logging
@@ -248,6 +255,9 @@ def run_processing(
     if export_targets is None:
         export_targets = ["disk"]
 
+    if filtered_tags is None:
+        filtered_tags = ["filter_count", "filter_quality"]
+
     export_base_dir = export_base_dir or Path("data/intermediate/v1") / dataset_name
 
     summary: dict[str, Any] = {
@@ -257,7 +267,7 @@ def run_processing(
     }
 
     for variant in variants:
-        view = _get_variant_view(dataset, variant, segmentation_field, dedup_field)
+        view = _get_variant_view(dataset, variant, segmentation_field, dedup_field, filtered_tags)
         variant_name = f"{dataset_name}_{variant}"
         summary["variants"][variant] = {"sample_count": len(view)}
 
@@ -340,6 +350,12 @@ def main() -> None:
         help="Field name for duplicate flag",
     )
     parser.add_argument(
+        "--filtered-tags",
+        nargs="+",
+        default=["filter_count", "filter_quality"],
+        help="Sample tags to exclude from non-master variants",
+    )
+    parser.add_argument(
         "--summary-location",
         type=Path,
         default=None,
@@ -367,6 +383,7 @@ def main() -> None:
             export_base_dir=args.export_base_dir,
             segmentation_field=args.segmentation_field,
             dedup_field=args.dedup_field,
+            filtered_tags=args.filtered_tags,
             summary_location=args.summary_location,
             dry_run=args.dry_run,
             verbose=args.verbose,

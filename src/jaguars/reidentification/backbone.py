@@ -165,6 +165,81 @@ class TimmBackbone(BackboneInterface):
         )
 
 
+class MiewIDBackbone(BackboneInterface):
+    """Backbone loader for MiewID models via HuggingFace transformers.
+
+    MiewID model cards document loading via:
+        AutoModel.from_pretrained("conservationxlabs/miewid-msv*", trust_remote_code=True)
+    """
+
+    def __init__(self, config: BackboneConfig):
+        super().__init__(config)
+
+        print(f"Loading {config.name} model via transformers AutoModel...")
+        try:
+            from transformers import AutoModel, PreTrainedModel
+        except ImportError as exc:
+            raise ImportError("transformers is required for MiewID backbones. Install with: pip install transformers") from exc
+
+        # Compatibility patch for newer transformers versions where
+        # remote-code models may not define this attribute expected by
+        # mark_tied_weights_as_initialized()
+        if not hasattr(PreTrainedModel, "all_tied_weights_keys"):
+            PreTrainedModel.all_tied_weights_keys = {}
+        elif not isinstance(PreTrainedModel.all_tied_weights_keys, dict):
+            PreTrainedModel.all_tied_weights_keys = {}
+
+        self.model = AutoModel.from_pretrained(config.name, trust_remote_code=True)
+        self.model.eval()
+
+        # Verify embedding dimension (best-effort)
+        with torch.no_grad():
+            dummy_input = torch.randn(1, 3, config.input_size, config.input_size)
+            dummy_output = self.forward(dummy_input)
+            if dummy_output.ndim != 2:
+                raise ValueError(f"Unexpected MiewID output shape: {tuple(dummy_output.shape)}")
+            actual_dim = int(dummy_output.shape[1])
+
+            if actual_dim != config.embedding_dim:
+                print(f"Warning: Expected embedding_dim={config.embedding_dim}, got {actual_dim}")
+                config.embedding_dim = actual_dim
+
+        print("Model loaded successfully")
+        print("  Backend: transformers.AutoModel (trust_remote_code=True)")
+        print(f"  Parameters: {sum(p.numel() for p in self.parameters()):,}")
+        print(f"  Embedding dimension: {config.embedding_dim}")
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        out = self.model(x)
+
+        # Common output patterns from HF models / custom remote code
+        if isinstance(out, torch.Tensor):
+            emb = out
+        elif hasattr(out, "last_hidden_state") and out.last_hidden_state is not None:
+            emb = out.last_hidden_state.mean(dim=1)
+        elif isinstance(out, (tuple, list)) and len(out) > 0 and isinstance(out[0], torch.Tensor):
+            emb = out[0]
+        else:
+            raise ValueError(f"Unsupported output type from MiewID model: {type(out)}")
+
+        if emb.ndim == 1:
+            emb = emb.unsqueeze(0)
+        elif emb.ndim > 2:
+            emb = emb.view(emb.shape[0], -1)
+
+        return cast(torch.Tensor, emb)
+
+    def get_preprocess(self) -> transforms.Compose:
+        # MiewID model card uses ImageNet normalization with 440x440 input
+        return transforms.Compose(
+            [
+                transforms.Resize((self.config.input_size, self.config.input_size)),
+                transforms.ToTensor(),
+                transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+            ]
+        )
+
+
 def get_backbone(config: BackboneConfig, device: str | None = None) -> BackboneInterface:
     """Factory function to get backbone by name.
 
@@ -184,7 +259,11 @@ def get_backbone(config: BackboneConfig, device: str | None = None) -> BackboneI
     if device is None:
         device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    # Use TimmBackbone for all models
-    backbone = TimmBackbone(config)
+    # MiewID models are loaded via transformers AutoModel with remote code
+    if config.name.startswith("conservationxlabs/miewid-"):
+        backbone = MiewIDBackbone(config)
+    else:
+        backbone = TimmBackbone(config)
+
     backbone.to(device)
     return backbone

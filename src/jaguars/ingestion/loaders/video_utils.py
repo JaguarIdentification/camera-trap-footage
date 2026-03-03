@@ -31,6 +31,23 @@ from pathlib import Path
 from tqdm import tqdm
 
 
+def _find_existing_mp4_for_stem(src: Path) -> Path | None:
+    """Return an existing MP4 path matching ``src`` stem, regardless of case."""
+    preferred = src.with_suffix(".MP4")
+    if preferred.exists():
+        return preferred
+
+    lower = src.with_suffix(".mp4")
+    if lower.exists():
+        return lower
+
+    for candidate in src.parent.glob(f"{src.stem}.*"):
+        if candidate.is_file() and candidate.suffix.lower() == ".mp4":
+            return candidate
+
+    return None
+
+
 def convert_avi_to_mp4(
     src: Path,
     dst: Path,
@@ -112,7 +129,7 @@ def batch_convert_avi(
     files: list[Path],
     *,
     delete_original: bool = False,
-    overwrite: bool = True,
+    overwrite: bool = False,
     codec: str = "libx264",
 ) -> dict[str, int]:
     """Convert a list of AVI files to MP4.
@@ -143,12 +160,16 @@ def batch_convert_avi(
             continue
 
         report["total_files"] += 1
+        existing_mp4 = _find_existing_mp4_for_stem(src)
         dst = src.with_suffix(".MP4")
 
-        if dst.exists() and not overwrite:
-            logging.info("Skipping conversion, output exists: %s", dst)
+        if existing_mp4 is not None and not overwrite:
+            logging.info("Skipping conversion, output exists: %s", existing_mp4)
             report["skipped_files"] += 1
             continue
+
+        if existing_mp4 is not None and overwrite:
+            dst = existing_mp4
 
         ok = convert_avi_to_mp4(src, dst, overwrite=overwrite, codec=codec)
         if ok:

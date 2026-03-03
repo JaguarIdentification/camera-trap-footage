@@ -355,9 +355,11 @@ def _train_variant(
             val_embeddings=val_emb,
             val_labels=val_data.labels_encoded,
             train_labels=train_data.labels_encoded,
+            all_labels=metadata.labels_encoded,
             label_encoder=metadata.label_encoder,
             device=device,
             max_cmc_rank=50,
+            min_total_samples_for_filtered=9,
         )
 
         val_map = val_metrics["identity_balanced_map"]

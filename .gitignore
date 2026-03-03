@@ -1,8 +1,10 @@
 # Kaggle credentials
 kaggle.json
+gdrive-download-*.json
 
 # Local dvc cache
 .dvc/cache/
+**/hf_cache/**
 
 .DS_Store
 
@@ -169,3 +171,6 @@ data/**/*.JPG
 data/**/*.PNG
 data/**/*.JSON
 /data
+
+# models
+*.pt

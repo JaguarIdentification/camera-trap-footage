@@ -95,6 +95,28 @@ def get_backbone_experiments(base_config: ReidentificationConfig | None = None) 
         base_config.model.arcface_scale = 64.0
 
     backbones: list[BackboneSpec] = [
+        # DINOv3 variants (timm versions)
+        BackboneSpec(
+            name="vit_large_patch16_dinov3.lvd1689m",
+            embedding_dim=1024,
+            description="DINOv3 Large (1024-dim, latest self-supervised)",
+        ),
+        BackboneSpec(
+            name="vit_base_patch16_dinov3.lvd1689m",
+            embedding_dim=768,
+            description="DINOv3 Base (768-dim, efficient high-quality)",
+        ),
+        # MiewID wildlife re-ID models
+        BackboneSpec(
+            name="conservationxlabs/miewid-msv2",
+            embedding_dim=2152,
+            description="MiewID-MSv2 (wildlife re-ID specialist)",
+        ),
+        BackboneSpec(
+            name="conservationxlabs/miewid-msv3",
+            embedding_dim=2152,
+            description="MiewID-MSv3 (wildlife re-ID specialist)",
+        ),
         # DINOv2 variants (timm versions)
         BackboneSpec(
             name="vit_large_patch14_dinov2.lvd142m",
@@ -143,6 +165,11 @@ def get_backbone_experiments(base_config: ReidentificationConfig | None = None) 
             embedding_dim=1536,
             description="EfficientNet B3 (efficient CNN)",
         ),
+        BackboneSpec(
+            name="hf-hub:timm/efficientnetv2_rw_m.agc_in1k",
+            embedding_dim=2152,
+            description="EfficientNetV2-RW-M (efficient CNN v2)",
+        ),
     ]
 
     import copy
@@ -158,6 +185,10 @@ def get_backbone_experiments(base_config: ReidentificationConfig | None = None) 
         # Set appropriate input size based on model
         if "dinov2" in backbone["name"]:
             config.backbone.input_size = 518
+        elif "dinov3" in backbone["name"]:
+            config.backbone.input_size = 512
+        elif "miewid" in backbone["name"].lower():
+            config.backbone.input_size = 440
         elif "megadescriptor" in backbone["name"].lower():
             if "384" in backbone["name"]:
                 config.backbone.input_size = 384
@@ -169,22 +200,15 @@ def get_backbone_experiments(base_config: ReidentificationConfig | None = None) 
             config.backbone.input_size = 224
         elif "resnet" in backbone["name"] or "convnext" in backbone["name"]:
             config.backbone.input_size = 224
+        elif "efficientnetv2" in backbone["name"].lower():
+            config.backbone.input_size = 320
         elif "efficientnet_b3" in backbone["name"]:
             config.backbone.input_size = 288
         else:
             config.backbone.input_size = 224  # Default
 
-        # Set appropriate embeddings field
-        if "dinov2" in backbone["name"].lower():
-            # Map dinov2 models to embedding field names
-            if "large" in backbone["name"]:
-                config.dataset.fo_embeddings_field = "embeddings_BVRA_MegaDescriptor_L_384"
-            elif "base" in backbone["name"]:
-                config.dataset.fo_embeddings_field = None  # No pre-computed embeddings for base
-            elif "small" in backbone["name"]:
-                config.dataset.fo_embeddings_field = None  # No pre-computed embeddings for small
-        else:
-            config.dataset.fo_embeddings_field = None  # Compute on the fly
+        # Always compute features for fair backbone comparison
+        config.dataset.fo_embeddings_field = None
 
         experiments.append(
             ExperimentConfig(
@@ -406,8 +430,9 @@ def get_dataset_experiments(base_config: ReidentificationConfig | None = None) -
 
         # Fixed backbone
         base_config.backbone.name = "vit_large_patch14_dinov2.lvd142m"
-        base_config.backbone.embedding_dim = 1536
+        base_config.backbone.embedding_dim = 1024
         base_config.backbone.pretrained = True
+        base_config.backbone.input_size = 518
 
         # Fixed loss
         base_config.training.loss_name = "arcface"
@@ -743,7 +768,7 @@ def get_embedding_dimension_experiments(base_config: ReidentificationConfig | No
     for dim in dimensions:
         config = copy.deepcopy(base_config)
         config.model.embedding_dim = dim
-        config.wandb.run_name = "embedding_dim_" + dim
+        config.wandb.run_name = f"embedding_dim_{dim}"
 
         experiments.append(
             ExperimentConfig(
@@ -805,6 +830,17 @@ def get_baseline_experiments(base_config: ReidentificationConfig | None = None) 
 
     # Backbone-only baselines for each backbone
     backbones: list[BackboneSpec] = [
+        # MiewID wildlife re-ID models
+        BackboneSpec(
+            name="conservationxlabs/miewid-msv2",
+            embedding_dim=2152,
+            description="MiewID-MSv2",
+        ),
+        BackboneSpec(
+            name="conservationxlabs/miewid-msv3",
+            embedding_dim=2152,
+            description="MiewID-MSv3",
+        ),
         # MegaDescriptor animal re-ID models (our main models)
         BackboneSpec(
             name="hf-hub:BVRA/MegaDescriptor-L-384",
@@ -853,6 +889,11 @@ def get_baseline_experiments(base_config: ReidentificationConfig | None = None) 
             embedding_dim=1536,
             description="EfficientNet B3",
         ),
+        BackboneSpec(
+            name="hf-hub:timm/efficientnetv2_rw_m.agc_in1k",
+            embedding_dim=2152,
+            description="EfficientNetV2-RW-M",
+        ),
         # DINOv3 models (latest self-supervised ViT)
         BackboneSpec(
             name="vit_large_patch16_dinov3.lvd1689m",
@@ -879,6 +920,8 @@ def get_baseline_experiments(base_config: ReidentificationConfig | None = None) 
             config.backbone.input_size = 518
         elif "dinov3" in backbone["name"]:
             config.backbone.input_size = 512
+        elif "miewid" in backbone["name"].lower():
+            config.backbone.input_size = 440
         elif "megadescriptor" in backbone["name"].lower():
             if "384" in backbone["name"]:
                 config.backbone.input_size = 384
@@ -890,6 +933,8 @@ def get_baseline_experiments(base_config: ReidentificationConfig | None = None) 
             config.backbone.input_size = 224
         elif "resnet" in backbone["name"] or "convnext" in backbone["name"]:
             config.backbone.input_size = 224
+        elif "efficientnetv2" in backbone["name"].lower():
+            config.backbone.input_size = 320
         elif "efficientnet_b3" in backbone["name"]:
             config.backbone.input_size = 288
         else:

@@ -26,6 +26,12 @@ BACKBONE_TO_FIELD_MAP = {
     "hf-hub:BVRA/MegaDescriptor-L-384": "embeddings_BVRA_MegaDescriptor_L_384",
     "BVRA/MegaDescriptor_L_384": "embeddings_BVRA_MegaDescriptor_L_384",
     "hf-hub:BVRA/MegaDescriptor-B-224": "embeddings_BVRA_MegaDescriptor_B_224",
+    # MiewID models
+    "conservationxlabs/miewid-msv2": "embeddings_MiewID_MSv2",
+    "conservationxlabs/miewid-msv3": "embeddings_MiewID_MSv3",
+    # DINOv3 models
+    "vit_large_patch16_dinov3.lvd1689m": "embeddings_DINOv3_Large",
+    "vit_base_patch16_dinov3.lvd1689m": "embeddings_DINOv3_Base",
     # DINOv2 models
     "vit_large_patch14_dinov2.lvd142m": "embeddings_DINOv2_Large",
     "vit_base_patch14_dinov2.lvd142m": "embeddings_DINOv2_Base",
@@ -35,6 +41,7 @@ BACKBONE_TO_FIELD_MAP = {
     "convnext_base": "embeddings_ConvNeXt_Base",
     "convnextv2_base.fcmae_ft_in22k_in1k": "embeddings_ConvNeXtV2_Base",
     "efficientnet_b3": "embeddings_EfficientNet_B3",
+    "hf-hub:timm/efficientnetv2_rw_m.agc_in1k": "embeddings_EfficientNetV2_RW_M",
 }
 
 
@@ -177,30 +184,84 @@ def load_from_huggingface(config: DatasetConfig) -> DatasetMetadata:
 
     logger.info(f"Loading dataset from HuggingFace: {config.hf_repo}")
 
-    dataset = load_dataset(config.hf_repo, revision=config.hf_revision)
-
     image_paths = []
     labels = []
     splits = []
 
-    # Process each split
-    for split_name in dataset.keys():
-        split_data = dataset[split_name]
+    # FiftyOne-exported HF datasets often store split labels per sample
+    split_candidates = [
+        config.fo_split_field,
+        "split",
+        "closed_set_split",
+        "open_set_split",
+    ]
 
-        for sample in split_data:
-            # Extract image path or download image
-            if config.image_field in sample:
+    def _extract_label(sample: dict[str, Any]) -> str | None:
+        if config.label_field not in sample:
+            return None
+        label_value = sample[config.label_field]
+        if isinstance(label_value, dict):
+            label_value = label_value.get("label")
+        if label_value is None:
+            return None
+        return str(label_value)
+
+    def _extract_split(sample: dict[str, Any], default_split: str) -> str:
+        split_value = default_split
+        for split_field in split_candidates:
+            if split_field and split_field in sample and sample[split_field] is not None:
+                split_value = str(sample[split_field])
+                break
+        return split_value
+
+    try:
+        dataset = load_dataset(config.hf_repo, revision=config.hf_revision)
+
+        # Process each split
+        for split_name in dataset.keys():
+            split_data = dataset[split_name]
+
+            for sample in split_data:
+                if config.image_field not in sample:
+                    raise ValueError(f"Image field '{config.image_field}' not found in dataset")
+
+                label = _extract_label(sample)
+                if label is None:
+                    continue
+
                 image_paths.append(sample[config.image_field])
-            else:
-                raise ValueError(f"Image field '{config.image_field}' not found in dataset")
+                labels.append(label)
+                splits.append(_extract_split(sample, split_name))
+    except Exception as exc:
+        logger.warning("datasets.load_dataset failed (%s); falling back to samples.json parsing", exc)
+        try:
+            from huggingface_hub import hf_hub_download
+        except ImportError as hub_exc:
+            raise ImportError("huggingface_hub is required for fallback loading. Install with: pip install huggingface_hub") from hub_exc
 
-            # Extract label
-            if config.label_field in sample:
-                labels.append(str(sample[config.label_field]))
-            else:
-                raise ValueError(f"Label field '{config.label_field}' not found in dataset")
+        samples_path = hf_hub_download(
+            repo_id=config.hf_repo,
+            repo_type="dataset",
+            filename="samples.json",
+            revision=config.hf_revision,
+        )
+        with open(samples_path) as f:
+            payload = json.load(f)
 
-            splits.append(split_name)
+        raw_samples = payload.get("samples", []) if isinstance(payload, dict) else payload
+        if not isinstance(raw_samples, list) or not raw_samples:
+            raise ValueError("Could not parse samples from samples.json")
+
+        for sample in raw_samples:
+            if config.image_field not in sample:
+                continue
+            label = _extract_label(sample)
+            if label is None:
+                continue
+
+            image_paths.append(sample[config.image_field])
+            labels.append(label)
+            splits.append(_extract_split(sample, "train"))
 
     logger.info(f"Loaded {len(image_paths)} images from HuggingFace")
 

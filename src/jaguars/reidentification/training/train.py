@@ -13,6 +13,7 @@ Training Modes:
 """
 
 import argparse
+import gc
 import json
 import logging
 from pathlib import Path
@@ -581,11 +582,23 @@ def run_processing(
     # Build model
     input_dim = train_embeddings.shape[1]
     model = build_model(input_dim, dataset_metadata.num_classes, config.model)
+
+    if config.training.loss_name == "subcenter_arcface":
+        model.arcface = SubCenterArcFaceLoss(
+            embedding_dim=config.model.embedding_dim,
+            num_classes=dataset_metadata.num_classes,
+            scale=config.model.arcface_scale,
+            margin=config.model.arcface_margin,
+            num_subcenters=config.training.num_subcenters,
+        )
+
     model.to(device)
 
     # Setup training components (losses)
     cls_criterion, triplet_criterion, _ = build_training_criterion(config, dataset_metadata.num_classes, config.model.embedding_dim)
     logger_instance.info(f"Loss: {config.training.loss_name}")
+    if config.training.loss_name == "subcenter_arcface":
+        logger_instance.info(f"  Sub-centers per class: {config.training.num_subcenters}")
     if triplet_criterion is not None:
         logger_instance.info(f"  Triplet weight: {config.training.triplet_weight}")
         logger_instance.info(f"  Triplet mining: {config.training.triplet_mining}")
@@ -654,9 +667,11 @@ def run_processing(
             val_embeddings=val_embeddings,
             val_labels=val_data.labels_encoded,
             train_labels=train_data.labels_encoded,
+            all_labels=dataset_metadata.labels_encoded,
             label_encoder=dataset_metadata.label_encoder,
             device=device,
             max_cmc_rank=50,
+            min_total_samples_for_filtered=9,
         )
 
         # Use identity-balanced mAP as primary metric (backward compatible)
@@ -696,19 +711,12 @@ def run_processing(
                         "lr": current_lr,
                     }
 
-                    # Add training-sample-stratified metrics
-                    for key, value in val_metrics.items():
-                        if key.startswith("map_train_") and value is not None:
-                            wandb_log[f"val/{key}"] = value
-
-                    # Log CMC curve as line plot
-                    cmc_curve = val_metrics["cmc_curve"]
-                    wandb_log["val/cmc_curve"] = wandb.plot.line(
-                        wandb.Table(data=[[i + 1, acc] for i, acc in enumerate(cmc_curve)], columns=["rank", "accuracy"]),
-                        "rank",
-                        "accuracy",
-                        title="CMC Curve",
-                    )
+                    if "map_min_total_9" in val_metrics:
+                        wandb_log["val/map_min_total_9"] = val_metrics["map_min_total_9"]
+                        wandb_log["val/cmc_min_total_9@1"] = val_metrics["cmc_min_total_9@1"]
+                        wandb_log["val/cmc_min_total_9@5"] = val_metrics["cmc_min_total_9@5"]
+                        wandb_log["val/cmc_min_total_9@10"] = val_metrics["cmc_min_total_9@10"]
+                        wandb_log["val/cmc_min_total_9@20"] = val_metrics["cmc_min_total_9@20"]
 
                     wandb.log(wandb_log)
             except ImportError:
@@ -800,6 +808,17 @@ def run_processing(
                 wandb.finish()
         except ImportError:
             pass
+
+    # Free memory to prevent OOM when running multiple experiments sequentially
+    del model, optimizer, cls_criterion, train_loader, val_loader
+    del train_dataset, val_dataset, train_embeddings, val_embeddings
+    if scheduler is not None:
+        del scheduler
+    if triplet_criterion is not None:
+        del triplet_criterion
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
     return results
 
