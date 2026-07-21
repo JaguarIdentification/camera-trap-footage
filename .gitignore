@@ -174,3 +174,6 @@ data/**/*.JSON
 
 # models
 *.pt
+
+# Local Git worktrees
+.worktrees/
