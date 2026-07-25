@@ -161,15 +161,14 @@ class LineageIndex:
             ("unique_filename", self._by_filename.get(terminal.filepath.name, [])),
         )
         for method, matches in lookups:
-            distinct_matches = list(dict.fromkeys(matches))
-            matched_candidate = self._one_logical_candidate(distinct_matches)
+            matched_candidate = self._one_logical_candidate(matches)
             if matched_candidate is not None:
                 return Enrichment(
                     status="matched",
                     match_method=method,
                     fields=matched_candidate.fields,
                 )
-            if distinct_matches:
+            if matches:
                 return Enrichment(status="ambiguous", match_method=None, fields=MappingProxyType({}))
         return Enrichment(status="missing", match_method=None, fields=MappingProxyType({}))
 
@@ -181,13 +180,9 @@ class LineageIndex:
             candidate = candidates[0]
             if candidate.candidate_type != "export":
                 return candidate
-            manifest_matches = list(
-                dict.fromkeys(
-                    self._manifests_by_identity_filename.get(
-                        (candidate.jaguar_id, candidate.original_filename or ""),
-                        [],
-                    )
-                )
+            manifest_matches = self._manifests_by_identity_filename.get(
+                (candidate.jaguar_id, candidate.original_filename or ""),
+                [],
             )
             if len(manifest_matches) == 1:
                 merged = _merge_export_manifest(candidate, manifest_matches[0])
@@ -204,6 +199,32 @@ class LineageIndex:
 
 def _normalize_path(value: str) -> str:
     return posixpath.normpath(value.strip().replace("\\", "/"))
+
+
+def _is_absolute_path(value: str) -> bool:
+    normalized = _normalize_path(value)
+    return posixpath.isabs(normalized) or bool(re.match(r"^[A-Za-z]:/", normalized))
+
+
+def _compose_source_path(
+    *,
+    direct_source_path: str | None,
+    file_path: str | None,
+    dataset_path: str | None,
+    raw_data_path: str | None,
+) -> str | None:
+    if direct_source_path is not None:
+        path = _normalize_path(direct_source_path)
+        base_path = raw_data_path or dataset_path
+    elif file_path is not None:
+        path = _normalize_path(file_path)
+        base_path = dataset_path or raw_data_path
+    else:
+        return None
+
+    if _is_absolute_path(path) or base_path is None:
+        return path
+    return _normalize_path(posixpath.join(_normalize_path(base_path), path))
 
 
 _ENRICHMENT_FIELD_NAMES = (
@@ -318,18 +339,12 @@ def load_manifest_candidates(manifest_path: Path) -> tuple[LineageCandidate, ...
     default_source_type = "pptx" if manifest_path.name.startswith("pptx_") else "csv"
     candidates = []
     for row in rows:
-        source_media_path = _first_value(row, "source_media_path")
-        if source_media_path is None:
-            source_media_path = _first_value(row, "file_path")
-            base_path = _first_value(row, "dataset_path") or _first_value(
-                row,
-                "raw_data_path",
-            )
-            if source_media_path is not None and base_path is not None and not posixpath.isabs(_normalize_path(source_media_path)):
-                source_media_path = posixpath.join(
-                    _normalize_path(base_path),
-                    _normalize_path(source_media_path),
-                )
+        source_media_path = _compose_source_path(
+            direct_source_path=_first_value(row, "source_media_path"),
+            file_path=_first_value(row, "file_path"),
+            dataset_path=_first_value(row, "dataset_path"),
+            raw_data_path=_first_value(row, "raw_data_path"),
+        )
         original_filename = _first_value(row, "original_filename")
         if original_filename is None and source_media_path is not None:
             original_filename = Path(_normalize_path(source_media_path)).name
@@ -337,7 +352,7 @@ def load_manifest_candidates(manifest_path: Path) -> tuple[LineageCandidate, ...
             LineageCandidate(
                 candidate_type="manifest",
                 source_id=_first_value(row, "source_id"),
-                normalized_source_filepath=(_normalize_path(source_media_path) if source_media_path is not None else None),
+                normalized_source_filepath=source_media_path,
                 export_relative_filepath=_first_value(
                     row,
                     "export_relative_filepath",
@@ -421,10 +436,15 @@ def load_export_candidates(export_dir: Path) -> tuple[LineageCandidate, ...]:
         else:
             export_relative_filepath = filepath
 
-        source_media_path = _json_string(sample, "source_media_path")
+        source_media_path = _compose_source_path(
+            direct_source_path=_json_string(sample, "source_media_path"),
+            file_path=_json_string(sample, "file_path"),
+            dataset_path=_json_string(sample, "dataset_path"),
+            raw_data_path=_json_string(sample, "raw_data_path"),
+        )
         if source_media_path is None and filepath is not None and posixpath.isabs(filepath):
             source_media_path = filepath
-        normalized_source_filepath = _normalize_path(source_media_path) if source_media_path is not None else None
+        normalized_source_filepath = source_media_path
         original_filename = _json_string(sample, "original_filename")
         if original_filename is None and filepath is not None:
             original_filename = Path(filepath).name

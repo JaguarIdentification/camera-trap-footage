@@ -165,18 +165,22 @@ def test_distinct_candidates_are_ambiguous_without_lower_precedence_fallback(
     assert dict(enrichment.fields) == {}
 
 
-def test_repeated_identical_candidates_are_one_logical_match(tmp_path: Path) -> None:
-    candidate = LineageCandidate(
-        original_filename="a.jpg",
-        sighting_id="same",
+def test_separately_loaded_value_equal_candidates_remain_ambiguous(
+    tmp_path: Path,
+) -> None:
+    manifest = tmp_path / "labels_with_splits.csv"
+    manifest.write_text(
+        "ORIGINAL FILE NAME,SIGHTING ID\n" "a.jpg,same\n" "a.jpg,same\n",
+        encoding="utf-8",
     )
-    index = LineageIndex.from_candidates([candidate, candidate])
+    candidates = load_manifest_candidates(manifest)
+    assert candidates[0] == candidates[1]
+    index = LineageIndex.from_candidates(candidates)
 
     enrichment = index.enrich(_terminal(tmp_path, "data/a.jpg", source_id="unmatched"))
 
-    assert enrichment.status == "matched"
-    assert enrichment.match_method == "unique_filename"
-    assert enrichment.fields["sighting_id"] == "same"
+    assert enrichment.status == "ambiguous"
+    assert enrichment.match_method is None
 
 
 def test_camera_manifest_normalizes_legacy_headers_and_both_splits(
@@ -237,6 +241,29 @@ def test_pptx_manifest_normalizes_its_alternate_headers_and_dataset_path(
     assert candidate.source_type == "pptx"
 
 
+def test_manifest_resolves_relative_and_absolute_raw_file_paths(
+    tmp_path: Path,
+) -> None:
+    manifest = tmp_path / "labels_with_splits.csv"
+    manifest.write_text(
+        "JAGUAR ID,ORIGINAL FILE NAME,RAW DATA PATH,DATASET PATH,FILE PATH,"
+        "RAW FILE PATH\n"
+        "F11,a.jpg,/raw/camera,/dataset/processed,derived/a.jpg,original/a.jpg\n"
+        "M03,b.jpg,/raw/camera,/dataset/processed,derived/b.jpg,/archive/b.jpg\n"
+        "U02,c.jpg,/raw/camera,,derived/c.jpg,\n",
+        encoding="utf-8",
+    )
+
+    relative_raw, absolute_raw, raw_plus_file = load_manifest_candidates(manifest)
+
+    assert relative_raw.normalized_source_filepath == "/raw/camera/original/a.jpg"
+    assert relative_raw.source_media_path == "/raw/camera/original/a.jpg"
+    assert absolute_raw.normalized_source_filepath == "/archive/b.jpg"
+    assert absolute_raw.source_media_path == "/archive/b.jpg"
+    assert raw_plus_file.normalized_source_filepath == "/raw/camera/derived/c.jpg"
+    assert raw_plus_file.source_media_path == "/raw/camera/derived/c.jpg"
+
+
 def test_export_candidates_normalize_fiftyone_ids_paths_and_approved_fields(
     tmp_path: Path,
 ) -> None:
@@ -293,7 +320,7 @@ def test_export_candidates_normalize_fiftyone_ids_paths_and_approved_fields(
         "capture_time": "03:04:05",
         "capture_datetime": "2024-01-02 03:04:05",
         "original_filename": "ORIGINAL.JPG",
-        "source_media_path": r"/raw\camera\..\a.jpg",
+        "source_media_path": "/raw/a.jpg",
         "source_type": "video_frame",
     }
 
@@ -331,6 +358,62 @@ def test_export_preserves_sample_and_source_id_aliases_for_exact_matching(
     assert enrichment.status == "matched"
     assert enrichment.match_method == "source_id"
     assert enrichment.fields["sighting_id"] == "S1"
+
+
+def test_export_resolves_actual_lowercase_source_path_fields(
+    tmp_path: Path,
+) -> None:
+    export_dir = tmp_path / "ingested"
+    export_dir.mkdir()
+    (export_dir / "samples.json").write_text(
+        json.dumps(
+            {
+                "samples": [
+                    {
+                        "_id": {"$oid": "raw-plus-file"},
+                        "filepath": "data/one.jpg",
+                        "raw_data_path": "/raw/camera",
+                        "file_path": "one.jpg",
+                    },
+                    {
+                        "_id": {"$oid": "relative-source"},
+                        "filepath": "data/two.jpg",
+                        "raw_data_path": "/raw/camera",
+                        "file_path": "derived/two.jpg",
+                        "source_filepath": "original/two.jpg",
+                    },
+                    {
+                        "_id": {"$oid": "absolute-raw-file"},
+                        "filepath": "data/three.jpg",
+                        "raw_data_path": "/raw/camera",
+                        "raw_file_path": "/archive/three.jpg",
+                    },
+                    {
+                        "_id": {"$oid": "absolute-source"},
+                        "filepath": "data/four.jpg",
+                        "raw_data_path": "/raw/camera",
+                        "source_filepath": "/archive/four.jpg",
+                    },
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    candidates = load_export_candidates(export_dir)
+
+    assert [candidate.normalized_source_filepath for candidate in candidates] == [
+        "/raw/camera/one.jpg",
+        "/raw/camera/original/two.jpg",
+        "/archive/three.jpg",
+        "/archive/four.jpg",
+    ]
+    assert [candidate.source_media_path for candidate in candidates] == [
+        "/raw/camera/one.jpg",
+        "/raw/camera/original/two.jpg",
+        "/archive/three.jpg",
+        "/archive/four.jpg",
+    ]
 
 
 def test_absolute_export_filepath_is_also_a_normalized_source_path(
