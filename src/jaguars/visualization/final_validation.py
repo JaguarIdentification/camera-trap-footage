@@ -40,6 +40,17 @@ class ValidatedRecord:
     enrichment: Enrichment
     integrity: MediaIntegrity
 
+    @property
+    def resolved_jaguar_id(self) -> str | None:
+        if self.terminal.jaguar_id is not None:
+            return self.terminal.jaguar_id
+        if self.enrichment.status != "matched":
+            return None
+        enriched_identity = self.enrichment.fields.get("jaguar_id")
+        if not isinstance(enriched_identity, str) or not enriched_identity.strip():
+            return None
+        return enriched_identity.strip()
+
 
 def _detection_entries(
     annotation: FrozenAnnotation,

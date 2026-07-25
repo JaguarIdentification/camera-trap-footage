@@ -35,6 +35,7 @@ def _terminal(
     *,
     bbox: object = (0.1, 0.2, 0.3, 0.4),
     filepath: Path | None = None,
+    jaguar_id: str | None = "F11",
     mask: object = ((0, 1), (1, 0)),
     relative_filepath: str = "data/a.png",
     source_id: str = "source-a",
@@ -43,7 +44,7 @@ def _terminal(
         source_id=source_id,
         filepath=filepath or tmp_path / "a.png",
         relative_filepath=relative_filepath,
-        jaguar_id="F11",
+        jaguar_id=jaguar_id,
         bboxes_body=_annotation({"label": "jaguar", "bounding_box": bbox}),
         segmentations_body=_annotation(
             {
@@ -212,6 +213,61 @@ def test_validated_record_aggregates_immutable_pipeline_records(tmp_path: Path) 
     assert (record.integrity.width, record.integrity.height) == (8, 6)
     with pytest.raises(FrozenInstanceError):
         record.integrity = MediaIntegrity("other", 1, 1, 1)  # type: ignore[misc]
+
+
+def test_validated_record_resolves_only_verified_string_identity_from_lineage(
+    tmp_path: Path,
+) -> None:
+    terminal = _terminal(tmp_path, jaguar_id=None)
+    integrity = MediaIntegrity("a" * 64, 100, 8, 6)
+
+    matched = ValidatedRecord(
+        terminal=terminal,
+        enrichment=Enrichment(
+            status="matched",
+            match_method="unique_filename",
+            fields=MappingProxyType({"jaguar_id": "F11"}),
+        ),
+        integrity=integrity,
+    )
+    missing = ValidatedRecord(
+        terminal=terminal,
+        enrichment=Enrichment(
+            status="missing",
+            match_method=None,
+            fields=MappingProxyType({"jaguar_id": "F11"}),
+        ),
+        integrity=integrity,
+    )
+    invalid = ValidatedRecord(
+        terminal=terminal,
+        enrichment=Enrichment(
+            status="matched",
+            match_method="unique_filename",
+            fields=MappingProxyType({"jaguar_id": 11}),
+        ),
+        integrity=integrity,
+    )
+
+    assert matched.resolved_jaguar_id == "F11"
+    assert missing.resolved_jaguar_id is None
+    assert invalid.resolved_jaguar_id is None
+
+
+def test_validated_record_preserves_terminal_identity_over_lineage(
+    tmp_path: Path,
+) -> None:
+    record = ValidatedRecord(
+        terminal=_terminal(tmp_path, jaguar_id="F11"),
+        enrichment=Enrichment(
+            status="matched",
+            match_method="source_id",
+            fields=MappingProxyType({"jaguar_id": "F11"}),
+        ),
+        integrity=MediaIntegrity("a" * 64, 100, 8, 6),
+    )
+
+    assert record.resolved_jaguar_id == "F11"
 
 
 def test_validate_unique_records_aggregates_duplicate_paths_and_hashes(

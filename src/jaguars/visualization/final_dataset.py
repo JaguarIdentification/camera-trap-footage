@@ -259,8 +259,7 @@ class Services:
     audit: Callable[[RuntimePaths], Audit]
     dataset_exists: Callable[[str], bool]
     load_dataset: Callable[[str], Any]
-    delete_dataset: Callable[[str], None]
-    create_snapshot: Callable[[Sequence[ValidatedRecord], str, str], Any]
+    create_snapshot: Callable[[Sequence[ValidatedRecord], str, str, bool], Any]
     verify_snapshot: Callable[[Any, Sequence[ValidatedRecord]], SnapshotSummary]
     launch: Callable[[Any, str, int], None]
     write_report: Callable[[RunReport, Path], Path]
@@ -362,9 +361,10 @@ def _report_paths(paths: RuntimePaths) -> dict[str, object]:
 
 
 def _audit_field_population(records: Sequence[ValidatedRecord]) -> dict[str, int]:
+    resolved_identity_count = sum(record.resolved_jaguar_id is not None for record in records)
     fields = {
-        "jaguar_id": len(records),
-        "ground_truth": len(records),
+        "jaguar_id": resolved_identity_count,
+        "ground_truth": resolved_identity_count,
         "bboxes_body": len(records),
         "segmentations_body": len(records),
         "lineage_status": len(records),
@@ -530,17 +530,19 @@ def _load_dataset(dataset_name: str) -> Any:
     return _fiftyone().load_dataset(dataset_name)
 
 
-def _delete_dataset(dataset_name: str) -> None:
-    _fiftyone().delete_dataset(dataset_name)
-
-
 def _create_snapshot(
     records: Sequence[ValidatedRecord],
     dataset_name: str,
     temporary_name: str,
+    replace_existing: bool,
 ) -> Any:
     snapshot = importlib.import_module("jaguars.visualization.final_snapshot")
-    return snapshot.create_snapshot(records, dataset_name, temporary_name)
+    return snapshot.create_snapshot(
+        records,
+        dataset_name,
+        temporary_name,
+        replace_existing=replace_existing,
+    )
 
 
 def _verify_snapshot(
@@ -566,7 +568,6 @@ DEFAULT_SERVICES = Services(
     audit=build_validated_records,
     dataset_exists=_dataset_exists,
     load_dataset=_load_dataset,
-    delete_dataset=_delete_dataset,
     create_snapshot=_create_snapshot,
     verify_snapshot=_verify_snapshot,
     launch=launch_and_wait,
@@ -669,12 +670,12 @@ def run(
                 )
             if not confirmed:
                 raise OverwriteDeclinedError(f"overwrite declined for dataset: {args.dataset_name}")
-            active_services.delete_dataset(args.dataset_name)
 
         dataset = active_services.create_snapshot(
             audit.records,
             args.dataset_name,
             f"{args.dataset_name}__building",
+            exists and args.overwrite,
         )
         summary = active_services.verify_snapshot(dataset, audit.records)
         completed = report.completed(summary, finished_at=active_services.now())

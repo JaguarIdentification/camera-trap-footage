@@ -138,17 +138,31 @@ def test_annotation_to_dict_returns_independent_mutable_data(
     assert detections[0]["label"] == "jaguar"
 
 
-@pytest.mark.parametrize("jaguar_id", [None, "", "   "])
-def test_load_terminal_records_rejects_missing_or_empty_identity(
+@pytest.mark.parametrize("missing_kind", ["absent", "null"])
+def test_load_terminal_records_preserves_missing_identity_as_none(
+    terminal_export: Path,
+    missing_kind: str,
+) -> None:
+    payload = _load_payload(terminal_export)
+    sample = payload["samples"][0]
+    if missing_kind == "absent":
+        del sample["jaguar_id"]
+    else:
+        sample["jaguar_id"] = None
+    _write_payload(terminal_export, payload)
+
+    records = load_terminal_records(terminal_export)
+
+    assert records[1].jaguar_id is None
+
+
+@pytest.mark.parametrize("jaguar_id", ["", "   ", 7, [], {}])
+def test_load_terminal_records_rejects_invalid_populated_identity(
     terminal_export: Path,
     jaguar_id: object,
 ) -> None:
     payload = _load_payload(terminal_export)
-    sample = payload["samples"][0]
-    if jaguar_id is None:
-        del sample["jaguar_id"]
-    else:
-        sample["jaguar_id"] = jaguar_id
+    payload["samples"][0]["jaguar_id"] = jaguar_id
     _write_payload(terminal_export, payload)
 
     with pytest.raises(TerminalExportError, match="jaguar_id"):

@@ -19,6 +19,7 @@ from jaguars.visualization.final_snapshot import (
     SAVED_VIEW_NAMES,
     SnapshotCollisionError,
     SnapshotError,
+    SnapshotReplacementError,
     SnapshotValidationError,
     create_snapshot,
     validated_record_to_sample,
@@ -192,6 +193,43 @@ def test_validated_record_maps_only_approved_schema_and_reconstructs_labels(
         "created_at",
         "last_modified_at",
     } == set(APPROVED_SAMPLE_FIELDS)
+
+
+def test_sample_identity_is_optional_and_uses_only_resolved_lineage(
+    tmp_path: Path,
+) -> None:
+    record = _validated_record(tmp_path)
+    missing_terminal = replace(record.terminal, jaguar_id=None)
+    unresolved = replace(record, terminal=missing_terminal)
+    resolved = _with_enrichment_fields(
+        unresolved,
+        {**record.enrichment.fields, "jaguar_id": "F11"},
+    )
+
+    unresolved_sample = validated_record_to_sample(unresolved)
+    resolved_sample = validated_record_to_sample(resolved)
+
+    assert unresolved_sample.jaguar_id is None
+    assert unresolved_sample.ground_truth is None
+    assert resolved_sample.jaguar_id == "F11"
+    assert isinstance(resolved_sample.ground_truth, fo.Classification)
+    assert resolved_sample.ground_truth.label == "F11"
+
+
+def test_snapshot_preserves_sample_with_unresolved_identity(
+    tmp_path: Path,
+    dataset_names: tuple[str, str],
+) -> None:
+    final_name, temporary_name = dataset_names
+    record = _validated_record(tmp_path)
+    unresolved = replace(record, terminal=replace(record.terminal, jaguar_id=None))
+
+    dataset = create_snapshot([unresolved], final_name, temporary_name)
+
+    sample = dataset.first()
+    assert sample.jaguar_id is None
+    assert sample.ground_truth is None
+    assert len(dataset) == 1
 
 
 def test_snapshot_declares_schema_inserts_persists_and_saves_eight_views(
@@ -556,3 +594,174 @@ def test_final_and_temporary_names_must_be_distinct(
         create_snapshot([_validated_record(tmp_path)], final_name, final_name)
 
     assert not fo.dataset_exists(final_name)
+
+
+def _existing_snapshot(
+    tmp_path: Path,
+    dataset_name: str,
+) -> tuple[fo.Dataset, Path, bytes]:
+    media_path = tmp_path / "old-source.jpg"
+    media_bytes = b"old immutable source media"
+    media_path.write_bytes(media_bytes)
+    dataset = fo.Dataset(dataset_name, persistent=True)
+    dataset.info["generation"] = "old"
+    dataset.add_sample(fo.Sample(filepath=str(media_path), generation="old"))
+    dataset.save()
+    return dataset, media_path, media_bytes
+
+
+def test_transactional_replacement_build_failure_preserves_old_final(
+    tmp_path: Path,
+    dataset_names: tuple[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    final_name, temporary_name = dataset_names
+    _existing_snapshot(tmp_path, final_name)
+
+    def fail_validation(dataset: fo.Dataset, records: list[ValidatedRecord]) -> None:
+        raise SnapshotValidationError("replacement validation failed")
+
+    monkeypatch.setattr(final_snapshot, "_validate_snapshot", fail_validation)
+
+    with pytest.raises(SnapshotValidationError, match="replacement validation failed"):
+        create_snapshot(
+            [_validated_record(tmp_path)],
+            final_name,
+            temporary_name,
+            replace_existing=True,
+        )
+
+    assert fo.load_dataset(final_name).info["generation"] == "old"
+    assert not any(name.startswith(f"{temporary_name}--") for name in fo.list_datasets())
+
+
+def test_transactional_replacement_first_rename_failure_preserves_old_final(
+    tmp_path: Path,
+    dataset_names: tuple[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    final_name, temporary_name = dataset_names
+    _existing_snapshot(tmp_path, final_name)
+
+    def fail_first_rename(dataset: fo.Dataset, name: str) -> None:
+        raise RuntimeError("first rename failed")
+
+    monkeypatch.setattr(final_snapshot, "_rename_dataset", fail_first_rename)
+
+    with pytest.raises(RuntimeError, match="first rename failed"):
+        create_snapshot(
+            [_validated_record(tmp_path)],
+            final_name,
+            temporary_name,
+            replace_existing=True,
+        )
+
+    assert fo.load_dataset(final_name).info["generation"] == "old"
+    assert not any(name.startswith(f"{temporary_name}--") for name in fo.list_datasets())
+
+
+def test_transactional_replacement_second_rename_failure_rolls_back_old_final(
+    tmp_path: Path,
+    dataset_names: tuple[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    final_name, temporary_name = dataset_names
+    _existing_snapshot(tmp_path, final_name)
+    original_rename = final_snapshot._rename_dataset
+    calls = 0
+
+    def fail_promotion(dataset: fo.Dataset, name: str) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise RuntimeError("second rename failed")
+        original_rename(dataset, name)
+
+    monkeypatch.setattr(final_snapshot, "_rename_dataset", fail_promotion)
+
+    with pytest.raises(RuntimeError, match="second rename failed"):
+        create_snapshot(
+            [_validated_record(tmp_path)],
+            final_name,
+            temporary_name,
+            replace_existing=True,
+        )
+
+    assert calls == 3
+    assert fo.load_dataset(final_name).info["generation"] == "old"
+    assert not any(name.startswith(f"{temporary_name}--") for name in fo.list_datasets())
+
+
+def test_transactional_replacement_rollback_failure_keeps_owned_backup(
+    tmp_path: Path,
+    dataset_names: tuple[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    final_name, temporary_name = dataset_names
+    _existing_snapshot(tmp_path, final_name)
+    original_rename = final_snapshot._rename_dataset
+    calls = 0
+
+    def fail_promotion_and_rollback(dataset: fo.Dataset, name: str) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            original_rename(dataset, name)
+            return
+        raise RuntimeError(f"rename {calls} failed")
+
+    monkeypatch.setattr(
+        final_snapshot,
+        "_rename_dataset",
+        fail_promotion_and_rollback,
+    )
+
+    with pytest.raises(SnapshotReplacementError, match="rollback failed"):
+        create_snapshot(
+            [_validated_record(tmp_path)],
+            final_name,
+            temporary_name,
+            replace_existing=True,
+        )
+
+    assert not fo.dataset_exists(final_name)
+    backup_names = [name for name in fo.list_datasets() if name.startswith(f"{temporary_name}--backup-")]
+    assert len(backup_names) == 1
+    assert fo.load_dataset(backup_names[0]).info["generation"] == "old"
+    assert not any("--build-" in name for name in fo.list_datasets())
+
+
+def test_transactional_replacement_swaps_records_without_deleting_media_or_foreign_datasets(
+    tmp_path: Path,
+    dataset_names: tuple[str, str],
+) -> None:
+    final_name, temporary_name = dataset_names
+    _, old_media_path, old_media_bytes = _existing_snapshot(tmp_path, final_name)
+    foreign = fo.Dataset(temporary_name, persistent=True)
+    foreign.info["owner"] = "foreign"
+    foreign.save()
+
+    with pytest.raises(SnapshotCollisionError, match="temporary dataset already exists"):
+        create_snapshot(
+            [_validated_record(tmp_path)],
+            final_name,
+            temporary_name,
+            replace_existing=True,
+        )
+
+    assert fo.load_dataset(final_name).info["generation"] == "old"
+    assert fo.load_dataset(temporary_name).info["owner"] == "foreign"
+    foreign.delete()
+
+    replacement = create_snapshot(
+        [_validated_record(tmp_path)],
+        final_name,
+        temporary_name,
+        replace_existing=True,
+    )
+
+    assert replacement.name == final_name
+    assert len(replacement) == 1
+    assert replacement.first().jaguar_id == "J00"
+    assert old_media_path.read_bytes() == old_media_bytes
+    assert not any(name.startswith(f"{temporary_name}--") for name in fo.list_datasets())

@@ -38,7 +38,7 @@
 
 - [ ] **Step 1: Write failing export-parser tests**
 
-Create fixtures with two tiny JPEGs and a `samples.json` containing `filepath`, `jaguar_id`, `bboxes_body`, and `segmentations_body`. Test path resolution, source IDs, parsed annotations, deterministic order, and rejection of a missing identity:
+Create fixtures with two tiny JPEGs and a `samples.json` containing `filepath`, optional `jaguar_id`, `bboxes_body`, and `segmentations_body`. Test path resolution, source IDs, parsed annotations, deterministic order, preservation of missing/null identity, and rejection of malformed populated identity:
 
 ```python
 def test_load_terminal_records_resolves_paths_and_annotations(terminal_export: Path) -> None:
@@ -78,7 +78,7 @@ class TerminalRecord:
     source_id: str
     filepath: Path
     relative_filepath: str
-    jaguar_id: str
+    jaguar_id: str | None
     bboxes_body: dict[str, Any]
     segmentations_body: dict[str, Any]
 
@@ -313,8 +313,12 @@ Map approved fields explicitly and reconstruct FiftyOne labels from the parsed d
 
 ```python
 sample = fo.Sample(filepath=str(record.terminal.filepath))
-sample["jaguar_id"] = record.terminal.jaguar_id
-sample["ground_truth"] = fo.Classification(label=record.terminal.jaguar_id)
+sample["jaguar_id"] = record.resolved_jaguar_id
+sample["ground_truth"] = (
+    None
+    if record.resolved_jaguar_id is None
+    else fo.Classification(label=record.resolved_jaguar_id)
+)
 sample["bboxes_body"] = deserialize_detections(record.terminal.bboxes_body)
 sample["segmentations_body"] = deserialize_detections(record.terminal.segmentations_body)
 sample["lineage_status"] = record.enrichment.status
@@ -400,7 +404,7 @@ def run(args: argparse.Namespace, services: Services = DEFAULT_SERVICES) -> int:
     return 0
 ```
 
-On overwrite, audit first, show existing/proposed counts, require the exact dataset name interactively unless `--yes`, and delete only via `fo.delete_dataset(dataset_name)`. `--launch-only` validates mounts and loads the existing snapshot without auditing media. Install SIGINT-safe App session cleanup.
+On overwrite, audit first, show existing/proposed counts, and require the exact dataset name interactively unless `--yes`. Pass the confirmed replacement request to the snapshot adapter, which builds and validates unique staging while the old final remains published, then performs a rollback-safe old-to-backup/staging-to-final swap. It deletes only the owned old backup after successful promotion and never deletes media. `--launch-only` validates mounts and loads the existing snapshot without auditing media. Install SIGINT-safe App session cleanup.
 
 - [ ] **Step 4: Run CLI tests and verify GREEN**
 

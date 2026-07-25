@@ -19,7 +19,7 @@ class TerminalRecord:
     source_id: str
     filepath: Path
     relative_filepath: str
-    jaguar_id: str
+    jaguar_id: str | None
     bboxes_body: FrozenAnnotation
     segmentations_body: FrozenAnnotation
 
@@ -116,16 +116,20 @@ def _parse_terminal_sample(
     if not isinstance(sample, dict):
         raise TerminalExportError("each samples.json entry must be an object")
 
-    jaguar_id = sample.get("jaguar_id")
-    if not isinstance(jaguar_id, str) or not jaguar_id.strip():
-        raise TerminalExportError("jaguar_id must be a nonempty string")
+    raw_jaguar_id = sample.get("jaguar_id")
+    if raw_jaguar_id is None:
+        jaguar_id = None
+    elif not isinstance(raw_jaguar_id, str) or not raw_jaguar_id.strip():
+        raise TerminalExportError("jaguar_id must be null or a nonempty string")
+    else:
+        jaguar_id = raw_jaguar_id.strip()
 
     filepath, relative_filepath = _media_path(export_dir, sample.get("filepath"))
     return TerminalRecord(
         source_id=_source_id(sample),
         filepath=filepath,
         relative_filepath=relative_filepath,
-        jaguar_id=jaguar_id.strip(),
+        jaguar_id=jaguar_id,
         bboxes_body=_annotation_container(sample, "bboxes_body"),
         segmentations_body=_annotation_container(sample, "segmentations_body"),
     )

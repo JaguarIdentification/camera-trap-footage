@@ -17,7 +17,7 @@ def _terminal(
     relative_filepath: str,
     *,
     source_id: str = "terminal-id",
-    jaguar_id: str = "F11",
+    jaguar_id: str | None = "F11",
 ) -> TerminalRecord:
     return TerminalRecord(
         source_id=source_id,
@@ -116,6 +116,49 @@ def test_exact_filename_matches_only_when_globally_unique(tmp_path: Path) -> Non
     assert enrichment.status == "matched"
     assert enrichment.match_method == "unique_filename"
     assert enrichment.fields["sighting_id"] == "filename"
+
+
+def test_unique_exact_match_enriches_missing_terminal_identity(tmp_path: Path) -> None:
+    index = LineageIndex.from_candidates(
+        [
+            LineageCandidate(
+                original_filename="a.jpg",
+                jaguar_id="F11",
+            )
+        ]
+    )
+
+    enrichment = index.enrich(
+        _terminal(
+            tmp_path,
+            "data/a.jpg",
+            source_id="unmatched",
+            jaguar_id=None,
+        )
+    )
+
+    assert enrichment.status == "matched"
+    assert enrichment.match_method == "unique_filename"
+    assert enrichment.fields["jaguar_id"] == "F11"
+
+
+def test_conflicting_exact_identity_is_not_treated_as_compatible(
+    tmp_path: Path,
+) -> None:
+    index = LineageIndex.from_candidates(
+        [
+            LineageCandidate(
+                source_id="terminal-id",
+                jaguar_id="M03",
+            )
+        ]
+    )
+
+    enrichment = index.enrich(_terminal(tmp_path, "data/a.jpg", jaguar_id="F11"))
+
+    assert enrichment.status == "ambiguous"
+    assert enrichment.match_method is None
+    assert dict(enrichment.fields) == {}
 
 
 def test_export_path_basename_participates_in_exact_filename_fallback(
@@ -306,6 +349,7 @@ def test_export_candidates_normalize_fiftyone_ids_paths_and_approved_fields(
     assert candidate.normalized_source_filepath == "/raw/a.jpg"
     assert candidate.export_relative_filepath == "data/a.jpg"
     assert candidate.fields == {
+        "jaguar_id": "F11",
         "closed_set_split": "train",
         "open_set_split": "test",
         "sighting_id": "S1",

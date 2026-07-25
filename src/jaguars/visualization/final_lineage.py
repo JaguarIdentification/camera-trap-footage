@@ -53,6 +53,7 @@ class LineageCandidate:
             {
                 key: value
                 for key, value in {
+                    "jaguar_id": self.jaguar_id,
                     "closed_set_split": self.closed_set_split,
                     "open_set_split": self.open_set_split,
                     "sighting_id": self.sighting_id,
@@ -163,6 +164,8 @@ class LineageIndex:
         for method, matches in lookups:
             matched_candidate = self._one_logical_candidate(matches)
             if matched_candidate is not None:
+                if not _identity_compatible(terminal.jaguar_id, matched_candidate.jaguar_id):
+                    return Enrichment(status="ambiguous", match_method=None, fields=MappingProxyType({}))
                 return Enrichment(
                     status="matched",
                     match_method=method,
@@ -195,6 +198,12 @@ class LineageIndex:
         if len(exports) == 1 and len(manifests) == 1 and len(candidates) == 2:
             return _merge_export_manifest(exports[0], manifests[0])
         return None
+
+
+def _identity_compatible(terminal_identity: str | None, candidate_identity: Scalar) -> bool:
+    if terminal_identity is None or candidate_identity is None:
+        return True
+    return isinstance(candidate_identity, str) and candidate_identity.strip() == terminal_identity
 
 
 def _normalize_path(value: str) -> str:

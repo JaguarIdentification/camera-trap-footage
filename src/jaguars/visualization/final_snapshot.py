@@ -74,8 +74,6 @@ _SPLIT_FIELDS = ("closed_set_split", "open_set_split")
 _APPROVED_SPLITS = frozenset(("train", "val", "test"))
 _FLOAT_ENRICHMENT_FIELDS = ("latitude", "longitude")
 _REQUIRED_VALUE_FIELDS = (
-    "jaguar_id",
-    "ground_truth",
     "bboxes_body",
     "segmentations_body",
     "lineage_status",
@@ -96,6 +94,10 @@ class SnapshotCollisionError(SnapshotError):
 
 class SnapshotValidationError(SnapshotError):
     """Raised when a temporary snapshot fails pre-publication validation."""
+
+
+class SnapshotReplacementError(SnapshotError):
+    """Raised when transactional replacement cannot safely complete."""
 
 
 def _validate_decoded_mask(mask: object, context: str) -> None:
@@ -166,10 +168,11 @@ def validated_record_to_sample(record: ValidatedRecord) -> fo.Sample:
     enrichment.update({field: _optional_float(record.enrichment.fields.get(field)) for field in _FLOAT_ENRICHMENT_FIELDS})
     terminal = record.terminal
     integrity = record.integrity
+    resolved_identity = record.resolved_jaguar_id
     return fo.Sample(
         filepath=str(terminal.filepath),
-        jaguar_id=terminal.jaguar_id,
-        ground_truth=fo.Classification(label=terminal.jaguar_id),
+        jaguar_id=resolved_identity,
+        ground_truth=None if resolved_identity is None else fo.Classification(label=resolved_identity),
         bboxes_body=_detections_from_export(terminal.bboxes_body, "bboxes_body"),
         segmentations_body=_detections_from_export(
             terminal.segmentations_body,
@@ -232,10 +235,11 @@ def _save_views(dataset: fo.Dataset) -> None:
 
 
 def _expected_identity(record: ValidatedRecord) -> tuple[object, ...]:
+    resolved_identity = record.resolved_jaguar_id
     return (
         str(record.terminal.filepath),
-        record.terminal.jaguar_id,
-        record.terminal.jaguar_id,
+        resolved_identity,
+        resolved_identity,
         record.integrity.sha256,
         record.integrity.size_bytes,
         record.integrity.width,
@@ -327,27 +331,102 @@ def _build_dataset_name(temporary_name: str) -> str:
     return f"{temporary_name}--build-{uuid4().hex}"
 
 
+def _build_backup_name(temporary_name: str) -> str:
+    return f"{temporary_name}--backup-{uuid4().hex}"
+
+
+def _rename_dataset(dataset: fo.Dataset, name: str) -> None:
+    dataset.name = name
+
+
+def _refuse_replacement_collisions(dataset_name: str, temporary_name: str) -> None:
+    if dataset_name == temporary_name:
+        raise SnapshotCollisionError("final and temporary dataset names must be distinct")
+    if not fo.dataset_exists(dataset_name):
+        raise SnapshotCollisionError(f"final dataset does not exist for replacement: {dataset_name}")
+    if fo.dataset_exists(temporary_name):
+        raise SnapshotCollisionError(f"temporary dataset already exists: {temporary_name}")
+
+
+def _rollback_original(
+    original: fo.Dataset,
+    dataset_name: str,
+    promotion_error: BaseException,
+) -> None:
+    try:
+        _rename_dataset(original, dataset_name)
+    except BaseException as rollback_error:
+        raise SnapshotReplacementError(
+            f"replacement promotion failed and rollback failed; " f"old dataset remains at {original.name}: {rollback_error}"
+        ) from promotion_error
+
+
+def _promote_replacement(
+    staged: fo.Dataset,
+    dataset_name: str,
+    temporary_name: str,
+) -> fo.Dataset:
+    original = fo.load_dataset(dataset_name)
+    backup_name = _build_backup_name(temporary_name)
+    if fo.dataset_exists(backup_name):
+        raise SnapshotCollisionError(f"replacement backup dataset already exists: {backup_name}")
+
+    try:
+        _rename_dataset(original, backup_name)
+    except BaseException as first_rename_error:
+        if original.name == backup_name and not fo.dataset_exists(dataset_name):
+            _rollback_original(original, dataset_name, first_rename_error)
+        raise
+
+    try:
+        _rename_dataset(staged, dataset_name)
+    except BaseException as promotion_error:
+        _rollback_original(original, dataset_name, promotion_error)
+        raise
+
+    try:
+        original.delete()
+    except BaseException as cleanup_error:
+        raise SnapshotReplacementError(f"replacement published but old backup cleanup failed at {backup_name}: {cleanup_error}") from cleanup_error
+    return staged
+
+
+def _cleanup_owned_build(
+    dataset: fo.Dataset | None,
+    owned_build_name: str | None,
+    dataset_name: str,
+) -> None:
+    if dataset is not None and not dataset.deleted and dataset.name != dataset_name:
+        dataset.delete()
+    elif owned_build_name is not None and fo.dataset_exists(owned_build_name):
+        fo.delete_dataset(owned_build_name)
+
+
 def create_snapshot(
     records: Sequence[ValidatedRecord],
     dataset_name: str,
     temporary_name: str,
+    *,
+    replace_existing: bool = False,
 ) -> fo.Dataset:
     """Atomically publish a persistent, validated FiftyOne snapshot."""
     owned_build_name: str | None = None
     dataset: fo.Dataset | None = None
     try:
-        _refuse_collisions(dataset_name, temporary_name)
+        if replace_existing:
+            _refuse_replacement_collisions(dataset_name, temporary_name)
+        else:
+            _refuse_collisions(dataset_name, temporary_name)
         owned_build_name = _build_dataset_name(temporary_name)
         dataset = fo.Dataset(owned_build_name, persistent=True)
         _declare_schema(dataset)
         _insert_bounded(dataset, records)
         _save_views(dataset)
         _validate_snapshot(dataset, records)
-        dataset.name = dataset_name
+        if replace_existing:
+            return _promote_replacement(dataset, dataset_name, temporary_name)
+        _rename_dataset(dataset, dataset_name)
         return dataset
-    except Exception:
-        if dataset is not None and not dataset.deleted:
-            dataset.delete()
-        elif owned_build_name is not None and fo.dataset_exists(owned_build_name):
-            fo.delete_dataset(owned_build_name)
+    except BaseException:
+        _cleanup_owned_build(dataset, owned_build_name, dataset_name)
         raise

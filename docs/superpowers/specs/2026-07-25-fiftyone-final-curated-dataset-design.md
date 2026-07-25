@@ -6,7 +6,7 @@ Create a persistent, frozen FiftyOne snapshot containing only the terminal artif
 
 ## Final-artifact boundary
 
-Each sample uses the terminal segmented jaguar image as its primary media and retains the final `bboxes_body`, `segmentations_body`, and `jaguar_id` annotations. The dataset also stores `ground_truth` as a FiftyOne `Classification`; its label must equal `jaguar_id`.
+Each sample uses the terminal segmented jaguar image as its primary media and retains the final `bboxes_body` and `segmentations_body` annotations. The terminal export contains 1,120 populated `jaguar_id` values and 247 null values. A null identity remains empty unless the approved exact lineage rules produce one unique compatible identity. When identity is resolved, the dataset stores both `jaguar_id` and a FiftyOne `ground_truth` `Classification` whose label equals it; otherwise both fields remain empty.
 
 The snapshot excludes raw videos, sampled frames, screenshots, earlier crops and segmentations, duplicate candidates, embeddings, deduplication scores, cache paths, temporary identifiers, random fields, and pipeline timestamps.
 
@@ -30,7 +30,7 @@ The implementation must not use fuzzy filenames, inferred numeric prefixes, imag
 
 The curated enrichment schema contains:
 
-- Identity: `jaguar_id`, `ground_truth`
+- Identity: optional `jaguar_id` and `ground_truth`
 - Evaluation: `closed_set_split`, `open_set_split`
 - Capture grouping: `sighting_id`
 - Location and device: `site`, `location`, `camera_id`, `camera_side`, `camera_model`, `latitude`, `longitude`
@@ -52,11 +52,11 @@ Generated state stays on external storage:
 
 Creation refuses to run unless `/Volumes/Extreme SSD` and `/Volumes/CameraTrapPython` are actual mounted filesystems and every configured generated-state path resolves below `/Volumes/CameraTrapPython/fiftyone`.
 
-The snapshot is immutable during ordinary operation. If the final dataset already exists, creation fails. Replacement requires `--overwrite`, prints existing and proposed sample counts, and requires interactive confirmation. Noninteractive replacement additionally requires `--yes`. Replacement deletes only the exact FiftyOne dataset record and never deletes media.
+The snapshot is immutable during ordinary operation. If the final dataset already exists, creation fails. Replacement requires `--overwrite`, prints existing and proposed sample counts, and requires interactive confirmation. Noninteractive replacement additionally requires `--yes`. Replacement first builds and validates an ownership-unique staging dataset while the old final remains published. It then renames the old final to an ownership-unique backup, promotes staging, and deletes the backup only after successful promotion. Promotion failure restores the old final and cleans only owned staging state; media is never deleted.
 
 ## Atomic creation
 
-Creation builds a temporary persistent FiftyOne dataset. All source and constructed-dataset checks run before the temporary dataset is renamed to `JaguarCameraTrap_Final_Curated_v1`. A failed build removes only its temporary dataset record and retains a failure report. It never changes an existing final snapshot or any media.
+Creation builds a temporary persistent FiftyOne dataset. All source and constructed-dataset checks run before the temporary dataset is renamed to `JaguarCameraTrap_Final_Curated_v1`. A failed build removes only its temporary dataset record and retains a failure report. Transactional replacement applies the same validation before any rename and rolls back the old final if promotion fails. It never removes an existing final before the replacement is complete or changes any media.
 
 ## Command-line interface
 
@@ -96,7 +96,7 @@ Creation fails if:
 
 - Any referenced final image is missing or unreadable
 - Final filepaths or content hashes are duplicated
-- `jaguar_id` and `ground_truth.label` disagree
+- Populated `jaguar_id` and `ground_truth.label` disagree, or only one of the pair is populated
 - A body mask or bounding box is malformed
 - The constructed sample count differs from the terminal export count
 
@@ -125,6 +125,7 @@ An integration test uses a temporary isolated FiftyOne database and image fixtur
 Before production creation, a real-data `--dry-run` must verify:
 
 - 1,367 terminal samples discovered
+- 1,120 terminal identities populated and all 247 null terminal identities preserved unless uniquely resolved by exact lineage
 - 1,367 unique readable media paths
 - 1,367 unique SHA-256 values
 - Valid final identity, bounding-box, and segmentation fields

@@ -1,6 +1,7 @@
 import json
 import os
 from collections.abc import Sequence
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from types import MappingProxyType
@@ -194,8 +195,8 @@ def _services(
         audit=lambda paths: events.append("audit") or audit,
         dataset_exists=lambda name: events.append("exists") or existing,
         load_dataset=lambda name: events.append("load") or dataset,
-        delete_dataset=lambda name: events.append(f"delete:{name}"),
-        create_snapshot=lambda records, name, temporary: events.append("create") or dataset,
+        create_snapshot=lambda records, name, temporary, replace_existing: events.append(f"create:{'replace' if replace_existing else 'new'}")
+        or dataset,
         verify_snapshot=lambda snapshot, records: events.append("verify")
         or SnapshotSummary(
             constructed_count=len(records),
@@ -220,8 +221,7 @@ def test_dry_run_audits_and_reports_without_fiftyone_services(tmp_path: Path) ->
             **services.__dict__,
             "dataset_exists": lambda name: pytest.fail("dry-run connected to FiftyOne"),
             "load_dataset": lambda name: pytest.fail("dry-run connected to FiftyOne"),
-            "delete_dataset": lambda name: pytest.fail("dry-run connected to FiftyOne"),
-            "create_snapshot": lambda records, name, temporary: pytest.fail("dry-run connected to FiftyOne"),
+            "create_snapshot": lambda records, name, temporary, replace_existing: pytest.fail("dry-run connected to FiftyOne"),
             "verify_snapshot": lambda snapshot, records: pytest.fail("dry-run connected to FiftyOne"),
             "launch": lambda snapshot, address, port: pytest.fail("dry-run launched the App"),
         }
@@ -289,7 +289,7 @@ def test_default_mode_audits_creates_reports_then_launches(tmp_path: Path) -> No
         "validate",
         "audit",
         "exists",
-        "create",
+        "create:new",
         "verify",
         "report",
         "launch",
@@ -313,13 +313,14 @@ def test_overwrite_decline_never_deletes_a_dataset_or_media(tmp_path: Path) -> N
         run(parse_args(["--create-only", "--overwrite"]), services=services, paths=_runtime_paths(tmp_path))
 
     assert events[:4] == ["validate", "audit", "exists", "load"]
-    assert not any(event.startswith("delete:") for event in events)
-    assert "create" not in events
+    assert not any(event.startswith("create:") for event in events)
     assert not hasattr(Path, "delete")
     assert media_path == tmp_path / "a.jpg"
 
 
-def test_overwrite_audits_and_confirms_before_deleting_the_exact_record(tmp_path: Path) -> None:
+def test_overwrite_audits_and_confirms_before_transactional_replacement(
+    tmp_path: Path,
+) -> None:
     events: list[str] = []
     reports: list[RunReport] = []
     audit = Audit(records=(_record(tmp_path),), terminal_count=1, lineage_candidate_count=6)
@@ -340,14 +341,13 @@ def test_overwrite_audits_and_confirms_before_deleting_the_exact_record(tmp_path
         == 0
     )
 
-    significant = [event for event in events if event in {"validate", "audit", "exists", "load", "create", "verify"} or event.startswith("delete:")]
+    significant = [event for event in events if event in {"validate", "audit", "exists", "load", "create:replace", "verify"}]
     assert significant == [
         "validate",
         "audit",
         "exists",
         "load",
-        f"delete:{DEFAULT_DATASET_NAME}",
-        "create",
+        "create:replace",
         "verify",
     ]
     assert reports[0].counts["constructed"] == 1
@@ -376,7 +376,7 @@ def test_yes_overwrite_is_noninteractive_but_still_prints_counts(tmp_path: Path)
 
     assert "print:Existing dataset samples: 1200" in events
     assert "print:Proposed dataset samples: 1" in events
-    assert f"delete:{DEFAULT_DATASET_NAME}" in events
+    assert "create:replace" in events
 
 
 def test_build_validated_records_loads_terminal_and_all_lineage_then_validates_expected_count(
@@ -460,6 +460,40 @@ def test_reports_serialize_success_and_failure_and_atomically_publish_latest(tmp
         "type": "ValueError",
         "message": "injected failure",
     }
+
+
+def test_report_identity_population_counts_only_resolved_values(tmp_path: Path) -> None:
+    record = _record(tmp_path)
+    missing_terminal = replace(record.terminal, jaguar_id=None)
+    unresolved = replace(
+        record,
+        terminal=missing_terminal,
+        enrichment=replace(
+            record.enrichment,
+            status="missing",
+            match_method=None,
+            fields=MappingProxyType({}),
+        ),
+    )
+    resolved = replace(
+        record,
+        terminal=missing_terminal,
+        enrichment=replace(
+            record.enrichment,
+            fields=MappingProxyType({"jaguar_id": "F11"}),
+        ),
+    )
+
+    report = RunReport.from_audit(
+        Audit(
+            records=(unresolved, resolved),
+            terminal_count=2,
+            lineage_candidate_count=1,
+        )
+    )
+
+    assert report.field_population["jaguar_id"] == 1
+    assert report.field_population["ground_truth"] == 1
 
 
 def test_app_session_closes_after_wait_and_keyboard_interrupt() -> None:
