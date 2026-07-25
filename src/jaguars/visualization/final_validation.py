@@ -14,6 +14,7 @@ from jaguars.visualization.final_records import FrozenAnnotation, TerminalRecord
 HASH_CHUNK_SIZE = 1024 * 1024
 APPROVED_STORAGE_ROOT = Path("/Volumes/CameraTrapPython/fiftyone")
 DuplicateKey = TypeVar("DuplicateKey", bound=Hashable)
+DuplicateItem = TypeVar("DuplicateItem")
 
 
 class IntegrityError(ValueError):
@@ -128,31 +129,39 @@ def validate_record(
 
 
 def _duplicate_groups(
-    records: Sequence[ValidatedRecord],
-    key: Callable[[ValidatedRecord], DuplicateKey],
-) -> list[tuple[DuplicateKey, list[ValidatedRecord]]]:
-    grouped: dict[DuplicateKey, list[ValidatedRecord]] = {}
-    for record in records:
-        grouped.setdefault(key(record), []).append(record)
+    items: Sequence[DuplicateItem],
+    key: Callable[[DuplicateItem], DuplicateKey],
+) -> list[tuple[DuplicateKey, list[DuplicateItem]]]:
+    grouped: dict[DuplicateKey, list[DuplicateItem]] = {}
+    for item in items:
+        grouped.setdefault(key(item), []).append(item)
     return [(value, matches) for value, matches in grouped.items() if len(matches) > 1]
 
 
-def _record_names(records: Sequence[ValidatedRecord]) -> str:
-    return ", ".join(record.terminal.relative_filepath for record in records)
+def _record_names(records: Sequence[TerminalRecord]) -> str:
+    return ", ".join(record.relative_filepath for record in records)
 
 
-def validate_unique_records(records: Sequence[ValidatedRecord]) -> None:
-    """Reject canonical filepath and content-hash duplicates."""
+def _duplicate_path_errors(records: Sequence[TerminalRecord]) -> list[str]:
     duplicate_paths = _duplicate_groups(
         records,
-        lambda record: record.terminal.filepath.resolve(),
+        lambda record: record.filepath.resolve(),
     )
+    return [f"duplicate canonical path {path}: {_record_names(matches)}" for path, matches in duplicate_paths]
+
+
+def _duplicate_hash_errors(records: Sequence[ValidatedRecord]) -> list[str]:
     duplicate_hashes = _duplicate_groups(
         records,
         lambda record: record.integrity.sha256,
     )
-    errors = [f"duplicate canonical path {path}: {_record_names(matches)}" for path, matches in duplicate_paths]
-    errors.extend(f"duplicate SHA-256 {digest}: {_record_names(matches)}" for digest, matches in duplicate_hashes)
+    return [f"duplicate SHA-256 {digest}: {_record_names([record.terminal for record in matches])}" for digest, matches in duplicate_hashes]
+
+
+def validate_unique_records(records: Sequence[ValidatedRecord]) -> None:
+    """Reject canonical filepath and content-hash duplicates."""
+    errors = _duplicate_path_errors([record.terminal for record in records])
+    errors.extend(_duplicate_hash_errors(records))
     if errors:
         raise IntegrityError("; ".join(errors))
 
@@ -177,6 +186,7 @@ def validate_records(
         except IntegrityError as exc:
             errors.append(str(exc))
 
+    errors.extend(_duplicate_path_errors([terminal for terminal, _ in records]))
     for terminal, enrichment in records:
         try:
             validate_annotations(terminal)
@@ -195,10 +205,7 @@ def validate_records(
                 )
             )
 
-    try:
-        validate_unique_records(validated)
-    except IntegrityError as exc:
-        errors.append(str(exc))
+    errors.extend(_duplicate_hash_errors(validated))
 
     if errors:
         raise IntegrityError("; ".join(errors))

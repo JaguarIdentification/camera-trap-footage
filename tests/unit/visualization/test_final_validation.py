@@ -295,6 +295,27 @@ def test_validate_records_reports_duplicates_alongside_annotation_failures(
     assert "data/a.png, data/second.png" in message
 
 
+def test_validate_records_detects_duplicate_paths_when_media_is_missing(
+    tmp_path: Path,
+) -> None:
+    missing_path = tmp_path / "missing.png"
+    first = _terminal(tmp_path, filepath=missing_path)
+    second = _terminal(
+        tmp_path,
+        filepath=missing_path,
+        relative_filepath="data/second.png",
+        source_id="source-b",
+    )
+
+    with pytest.raises(IntegrityError) as caught:
+        validate_records([(first, _enrichment()), (second, _enrichment())])
+
+    message = str(caught.value)
+    assert message.count("media is missing or unreadable") == 2
+    assert message.count("duplicate canonical path") == 1
+    assert "data/a.png, data/second.png" in message
+
+
 def test_validate_mounts_uses_injected_mount_predicate() -> None:
     required = [Path("/Volumes/Extreme SSD"), Path("/Volumes/CameraTrapPython")]
     inspected: list[Path] = []
