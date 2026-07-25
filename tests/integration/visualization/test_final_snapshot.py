@@ -1,9 +1,11 @@
 import hashlib
+from dataclasses import replace
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any, cast
 
 import fiftyone as fo
+import fiftyone.core.dataset as fod
 import fiftyone.core.fields as fof
 import fiftyone.core.utils as fou
 import numpy as np
@@ -16,6 +18,7 @@ from jaguars.visualization.final_snapshot import (
     APPROVED_SAMPLE_FIELDS,
     SAVED_VIEW_NAMES,
     SnapshotCollisionError,
+    SnapshotError,
     SnapshotValidationError,
     create_snapshot,
     validated_record_to_sample,
@@ -125,6 +128,35 @@ def _six_split_records(tmp_path: Path) -> list[ValidatedRecord]:
     ]
 
 
+def _with_enrichment_fields(record: ValidatedRecord, fields: dict[str, object]) -> ValidatedRecord:
+    return replace(
+        record,
+        enrichment=replace(
+            record.enrichment,
+            fields=MappingProxyType(cast(dict[str, Any], fields)),
+        ),
+    )
+
+
+def _with_segmentation_mask(record: ValidatedRecord, mask: object) -> ValidatedRecord:
+    terminal = replace(
+        record.terminal,
+        segmentations_body=cast(
+            FrozenAnnotation,
+            {
+                "detections": [
+                    {
+                        "label": "jaguar",
+                        "bounding_box": [0.1, 0.2, 0.3, 0.4],
+                        "mask": mask,
+                    }
+                ]
+            },
+        ),
+    )
+    return replace(record, terminal=terminal)
+
+
 def test_validated_record_maps_only_approved_schema_and_reconstructs_labels(
     tmp_path: Path,
 ) -> None:
@@ -232,6 +264,101 @@ def test_snapshot_declares_schema_inserts_persists_and_saves_eight_views(
     )
 
 
+@pytest.mark.parametrize("explicit_none", [False, True])
+def test_absent_split_values_are_allowed_and_excluded_from_split_views(
+    tmp_path: Path,
+    dataset_names: tuple[str, str],
+    explicit_none: bool,
+) -> None:
+    final_name, temporary_name = dataset_names
+    record = _validated_record(tmp_path)
+    fields = dict(record.enrichment.fields)
+    if explicit_none:
+        fields["closed_set_split"] = None
+        fields["open_set_split"] = None
+    else:
+        fields.pop("closed_set_split")
+        fields.pop("open_set_split")
+
+    dataset = create_snapshot(
+        [_with_enrichment_fields(record, fields)],
+        final_name,
+        temporary_name,
+    )
+
+    sample = dataset.first()
+    assert sample.closed_set_split is None
+    assert sample.open_set_split is None
+    for view_name in SAVED_VIEW_NAMES[2:]:
+        assert len(dataset.load_saved_view(view_name)) == 0
+
+
+@pytest.mark.parametrize(
+    ("field_name", "invalid_value"),
+    [
+        ("closed_set_split", "development"),
+        ("open_set_split", 7),
+    ],
+)
+def test_populated_split_values_must_be_approved_strings(
+    tmp_path: Path,
+    dataset_names: tuple[str, str],
+    field_name: str,
+    invalid_value: object,
+) -> None:
+    final_name, temporary_name = dataset_names
+    record = _validated_record(tmp_path)
+    fields = dict(record.enrichment.fields)
+    fields[field_name] = invalid_value
+
+    with pytest.raises(SnapshotValidationError, match=field_name):
+        create_snapshot(
+            [_with_enrichment_fields(record, fields)],
+            final_name,
+            temporary_name,
+        )
+
+    assert not fo.dataset_exists(final_name)
+    assert not fo.dataset_exists(temporary_name)
+
+
+@pytest.mark.parametrize(
+    ("mask_payload", "expected_message"),
+    [
+        ("not-a-serialized-mask", "could not decode"),
+        (
+            fou.serialize_numpy_array(np.ones((2, 2, 1), dtype=np.uint8), ascii=True),
+            "two-dimensional",
+        ),
+        (
+            fou.serialize_numpy_array(np.ones((2, 2), dtype=np.float32), ascii=True),
+            "boolean or integer dtype",
+        ),
+        (
+            fou.serialize_numpy_array(np.array([[0, 2], [1, 0]], dtype=np.uint8), ascii=True),
+            "binary values",
+        ),
+    ],
+)
+def test_invalid_serialized_masks_fail_cleanly_before_publication(
+    tmp_path: Path,
+    dataset_names: tuple[str, str],
+    mask_payload: str,
+    expected_message: str,
+) -> None:
+    final_name, temporary_name = dataset_names
+    record = _with_segmentation_mask(_validated_record(tmp_path), mask_payload)
+
+    with pytest.raises(
+        SnapshotError,
+        match=rf"segmentations_body.*mask.*{expected_message}",
+    ):
+        create_snapshot([record], final_name, temporary_name)
+
+    assert not fo.dataset_exists(final_name)
+    assert not fo.dataset_exists(temporary_name)
+
+
 def test_count_mismatch_removes_both_atomic_names(
     tmp_path: Path,
     dataset_names: tuple[str, str],
@@ -248,6 +375,25 @@ def test_count_mismatch_removes_both_atomic_names(
 
     with pytest.raises(SnapshotValidationError, match="expected 6 samples, found 5"):
         create_snapshot(records, final_name, temporary_name)
+
+    assert not fo.dataset_exists(final_name)
+    assert not fo.dataset_exists(temporary_name)
+
+
+def test_constructor_failure_after_metadata_insert_removes_temporary_dataset(
+    tmp_path: Path,
+    dataset_names: tuple[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    final_name, temporary_name = dataset_names
+
+    def fail_index_creation(sample_collection_name: str, frame_collection_name: str | None) -> None:
+        raise RuntimeError("forced index creation failure")
+
+    monkeypatch.setattr(fod, "_create_indexes", fail_index_creation)
+
+    with pytest.raises(RuntimeError, match="forced index creation failure"):
+        create_snapshot([_validated_record(tmp_path)], final_name, temporary_name)
 
     assert not fo.dataset_exists(final_name)
     assert not fo.dataset_exists(temporary_name)

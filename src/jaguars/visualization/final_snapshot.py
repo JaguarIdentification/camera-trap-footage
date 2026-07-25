@@ -2,6 +2,7 @@ from collections.abc import Sequence
 
 import fiftyone as fo
 import fiftyone.core.fields as fof
+import numpy as np
 from fiftyone import ViewField as F
 
 from jaguars.visualization.final_lineage import Scalar
@@ -55,8 +56,6 @@ SAVED_VIEW_NAMES = (
 )
 
 _STRING_ENRICHMENT_FIELDS = (
-    "closed_set_split",
-    "open_set_split",
     "sighting_id",
     "site",
     "location",
@@ -70,6 +69,8 @@ _STRING_ENRICHMENT_FIELDS = (
     "source_media_path",
     "source_type",
 )
+_SPLIT_FIELDS = ("closed_set_split", "open_set_split")
+_APPROVED_SPLITS = frozenset(("train", "val", "test"))
 _FLOAT_ENRICHMENT_FIELDS = ("latitude", "longitude")
 _REQUIRED_VALUE_FIELDS = (
     "jaguar_id",
@@ -84,20 +85,52 @@ _REQUIRED_VALUE_FIELDS = (
 )
 
 
-class SnapshotCollisionError(ValueError):
+class SnapshotError(ValueError):
+    """Base class for controlled snapshot construction failures."""
+
+
+class SnapshotCollisionError(SnapshotError):
     """Raised when an atomic snapshot name is not available."""
 
 
-class SnapshotValidationError(ValueError):
+class SnapshotValidationError(SnapshotError):
     """Raised when a temporary snapshot fails pre-publication validation."""
 
 
-def _detections_from_export(annotation: FrozenAnnotation) -> fo.Detections:
+def _validate_decoded_mask(mask: object, context: str) -> None:
+    if not isinstance(mask, np.ndarray):
+        raise SnapshotValidationError(f"{context} must decode to a numpy array")
+    if mask.ndim != 2:
+        raise SnapshotValidationError(f"{context} must decode to a two-dimensional array")
+    if mask.dtype.kind not in ("b", "i", "u"):
+        raise SnapshotValidationError(f"{context} must decode to a boolean or integer dtype")
+    if mask.size == 0 or not np.logical_or(mask == 0, mask == 1).all():
+        raise SnapshotValidationError(f"{context} must contain nonempty binary values")
+
+
+def _detections_from_export(
+    annotation: FrozenAnnotation,
+    field_name: str,
+) -> fo.Detections:
     payload = annotation_to_dict(annotation)
     detections = payload.get("detections")
     if not isinstance(detections, list):
-        raise SnapshotValidationError("annotation detections must be a list")
-    return fo.Detections(detections=[fo.Detection.from_dict(detection) for detection in detections])
+        raise SnapshotValidationError(f"{field_name}.detections must be a list")
+
+    reconstructed: list[fo.Detection] = []
+    for index, detection in enumerate(detections):
+        mask_context = f"{field_name}.detections[{index}].mask"
+        try:
+            reconstructed_detection = fo.Detection.from_dict(detection)
+        except Exception as exc:
+            if "mask" in detection:
+                raise SnapshotValidationError(f"{mask_context} could not decode") from exc
+            raise SnapshotValidationError(f"{field_name}.detections[{index}] could not be reconstructed") from exc
+        if "mask" in detection:
+            _validate_decoded_mask(reconstructed_detection.mask, mask_context)
+        reconstructed.append(reconstructed_detection)
+
+    return fo.Detections(detections=reconstructed)
 
 
 def _optional_string(value: Scalar) -> str | None:
@@ -117,9 +150,18 @@ def _optional_float(value: Scalar) -> float | None:
         raise SnapshotValidationError(f"invalid coordinate enrichment value: {value!r}") from exc
 
 
+def _optional_split(field_name: str, value: Scalar) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise SnapshotValidationError(f"{field_name} must be a string when populated")
+    return value
+
+
 def validated_record_to_sample(record: ValidatedRecord) -> fo.Sample:
     """Map one immutable validated record into the approved sample schema."""
     enrichment: dict[str, object] = {field: _optional_string(record.enrichment.fields.get(field)) for field in _STRING_ENRICHMENT_FIELDS}
+    enrichment.update({field: _optional_split(field, record.enrichment.fields.get(field)) for field in _SPLIT_FIELDS})
     enrichment.update({field: _optional_float(record.enrichment.fields.get(field)) for field in _FLOAT_ENRICHMENT_FIELDS})
     terminal = record.terminal
     integrity = record.integrity
@@ -127,8 +169,11 @@ def validated_record_to_sample(record: ValidatedRecord) -> fo.Sample:
         filepath=str(terminal.filepath),
         jaguar_id=terminal.jaguar_id,
         ground_truth=fo.Classification(label=terminal.jaguar_id),
-        bboxes_body=_detections_from_export(terminal.bboxes_body),
-        segmentations_body=_detections_from_export(terminal.segmentations_body),
+        bboxes_body=_detections_from_export(terminal.bboxes_body, "bboxes_body"),
+        segmentations_body=_detections_from_export(
+            terminal.segmentations_body,
+            "segmentations_body",
+        ),
         lineage_status=record.enrichment.status,
         lineage_match_method=record.enrichment.match_method,
         **enrichment,
@@ -149,6 +194,7 @@ def _declare_schema(dataset: fo.Dataset) -> None:
         "jaguar_id",
         "lineage_status",
         "lineage_match_method",
+        *_SPLIT_FIELDS,
         *_STRING_ENRICHMENT_FIELDS,
         "sha256",
     )
@@ -222,6 +268,14 @@ def _validate_required_fields(dataset: fo.Dataset) -> None:
             raise SnapshotValidationError(f"required fields missing values for {sample.filepath}: {', '.join(missing_values)}")
 
 
+def _validate_split_values(dataset: fo.Dataset) -> None:
+    for sample in dataset.iter_samples(progress=False):
+        for field_name in _SPLIT_FIELDS:
+            value = sample.get_field(field_name)
+            if value is not None and value not in _APPROVED_SPLITS:
+                raise SnapshotValidationError(f"{field_name} must be one of train, val, test when populated; found {value!r}")
+
+
 def _validate_snapshot(
     dataset: fo.Dataset,
     records: Sequence[ValidatedRecord],
@@ -237,6 +291,7 @@ def _validate_snapshot(
         raise SnapshotValidationError("snapshot identity agreement failed")
 
     _validate_required_fields(dataset)
+    _validate_split_values(dataset)
     actual_views = tuple(dataset.list_saved_views())
     if actual_views != SAVED_VIEW_NAMES:
         raise SnapshotValidationError(f"saved views do not match approved views: expected {SAVED_VIEW_NAMES!r}, found {actual_views!r}")
@@ -273,9 +328,11 @@ def create_snapshot(
     temporary_name: str,
 ) -> fo.Dataset:
     """Atomically publish a persistent, validated FiftyOne snapshot."""
-    _refuse_collisions(dataset_name, temporary_name)
+    temporary_name_was_absent = False
     dataset: fo.Dataset | None = None
     try:
+        _refuse_collisions(dataset_name, temporary_name)
+        temporary_name_was_absent = True
         dataset = fo.Dataset(temporary_name, persistent=True)
         _declare_schema(dataset)
         _insert_bounded(dataset, records)
@@ -286,4 +343,6 @@ def create_snapshot(
     except Exception:
         if dataset is not None and not dataset.deleted:
             dataset.delete()
+        elif temporary_name_was_absent and fo.dataset_exists(temporary_name):
+            fo.delete_dataset(temporary_name)
         raise
