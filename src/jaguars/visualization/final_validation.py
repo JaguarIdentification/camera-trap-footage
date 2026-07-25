@@ -179,9 +179,21 @@ def validate_records(
 
     for terminal, enrichment in records:
         try:
-            validated.append(validate_record(terminal, enrichment))
+            validate_annotations(terminal)
         except IntegrityError as exc:
             errors.append(str(exc))
+        try:
+            integrity = validate_media(terminal.filepath)
+        except IntegrityError as exc:
+            errors.append(str(exc))
+        else:
+            validated.append(
+                ValidatedRecord(
+                    terminal=terminal,
+                    enrichment=enrichment,
+                    integrity=integrity,
+                )
+            )
 
     try:
         validate_unique_records(validated)

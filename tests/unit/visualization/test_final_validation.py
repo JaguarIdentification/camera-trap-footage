@@ -252,6 +252,49 @@ def test_validate_records_validates_a_batch_and_expected_count(tmp_path: Path) -
         validate_records([pair], expected_count=2)
 
 
+def test_validate_records_aggregates_annotation_and_media_errors_per_record(
+    tmp_path: Path,
+) -> None:
+    terminal = _terminal(
+        tmp_path,
+        bbox=("bad", 0.2, 0.3, 0.4),
+        filepath=tmp_path / "missing.png",
+        relative_filepath="data/broken.png",
+    )
+
+    with pytest.raises(IntegrityError) as caught:
+        validate_records([(terminal, _enrichment())])
+
+    message = str(caught.value)
+    assert "data/broken.png: bboxes_body.detections[0].bounding_box" in message
+    assert f"media is missing or unreadable: {terminal.filepath}" in message
+
+
+def test_validate_records_reports_duplicates_alongside_annotation_failures(
+    tmp_path: Path,
+) -> None:
+    first_path = tmp_path / "first.png"
+    second_path = tmp_path / "second.png"
+    Image.new("RGB", (8, 6), color=(10, 20, 30)).save(first_path)
+    second_path.write_bytes(first_path.read_bytes())
+    first = _terminal(tmp_path, filepath=first_path)
+    second = _terminal(
+        tmp_path,
+        bbox=(float("nan"), 0.2, 0.3, 0.4),
+        filepath=second_path,
+        relative_filepath="data/second.png",
+        source_id="source-b",
+    )
+
+    with pytest.raises(IntegrityError) as caught:
+        validate_records([(first, _enrichment()), (second, _enrichment())])
+
+    message = str(caught.value)
+    assert "data/second.png: bboxes_body.detections[0].bounding_box" in message
+    assert "duplicate SHA-256" in message
+    assert "data/a.png, data/second.png" in message
+
+
 def test_validate_mounts_uses_injected_mount_predicate() -> None:
     required = [Path("/Volumes/Extreme SSD"), Path("/Volumes/CameraTrapPython")]
     inspected: list[Path] = []
