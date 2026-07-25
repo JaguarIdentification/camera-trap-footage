@@ -394,17 +394,23 @@ def _database_document_by_id(dataset_id: Any) -> dict[str, Any] | None:
 
 
 def _query_document_by_id_with_retry(dataset_id: Any) -> dict[str, Any] | None:
-    try:
-        return _database_document_by_id(dataset_id)
-    except BaseException:
-        return _database_document_by_id(dataset_id)
+    for attempt in range(3):
+        try:
+            return _database_document_by_id(dataset_id)
+        except BaseException:
+            if attempt == 2:
+                raise
+    raise AssertionError("unreachable")
 
 
 def _query_document_by_name_with_retry(name: str) -> dict[str, Any] | None:
-    try:
-        return _database_document_by_name(name)
-    except BaseException:
-        return _database_document_by_name(name)
+    for attempt in range(3):
+        try:
+            return _database_document_by_name(name)
+        except BaseException:
+            if attempt == 2:
+                raise
+    raise AssertionError("unreachable")
 
 
 def _document_name(document: dict[str, Any] | None) -> str | None:
@@ -544,9 +550,9 @@ def _recover_backup_rename_failure(
     backup_name: str,
     rename_error: BaseException,
 ) -> None:
-    original_document = _database_document_by_id(original_id)
+    original_document = _query_document_by_id_with_retry(original_id)
     original_name = _document_name(original_document)
-    final_document = _database_document_by_name(dataset_name)
+    final_document = _query_document_by_name_with_retry(dataset_name)
     if original_name == dataset_name and final_document is not None and final_document.get("_id") == original_id:
         return
     if original_name == backup_name:
@@ -666,19 +672,27 @@ def _promote_replacement(
     if _database_document_by_name(backup_name) is not None:
         raise SnapshotCollisionError(f"replacement backup dataset already exists: {backup_name}")
 
+    transaction.phase = _SnapshotPhase.PROMOTION_ATTEMPTED
     try:
         _rename_dataset(original, backup_name)
     except BaseException as first_rename_error:
-        _recover_backup_rename_failure(
-            original,
-            original_id,
-            dataset_name,
-            backup_name,
-            first_rename_error,
-        )
+        try:
+            _recover_backup_rename_failure(
+                original,
+                original_id,
+                dataset_name,
+                backup_name,
+                first_rename_error,
+            )
+        finally:
+            _delete_owned_for_recovery(
+                staged,
+                ownership,
+                backup_name,
+                first_rename_error,
+            )
         raise
 
-    transaction.phase = _SnapshotPhase.PROMOTION_ATTEMPTED
     try:
         renamed_original = _query_document_by_id_with_retry(original_id)
     except BaseException as query_error:
