@@ -143,11 +143,18 @@ def _record_names(records: Sequence[TerminalRecord]) -> str:
 
 
 def _duplicate_path_errors(records: Sequence[TerminalRecord]) -> list[str]:
-    duplicate_paths = _duplicate_groups(
-        records,
-        lambda record: record.filepath.resolve(),
-    )
-    return [f"duplicate canonical path {path}: {_record_names(matches)}" for path, matches in duplicate_paths]
+    grouped: dict[Path, list[TerminalRecord]] = {}
+    errors: list[str] = []
+    for record in records:
+        try:
+            canonical_path = record.filepath.resolve()
+        except (OSError, RuntimeError, ValueError) as exc:
+            errors.append(f"{record.relative_filepath}: could not resolve canonical path {record.filepath}: {exc}")
+        else:
+            grouped.setdefault(canonical_path, []).append(record)
+
+    errors.extend(f"duplicate canonical path {path}: {_record_names(matches)}" for path, matches in grouped.items() if len(matches) > 1)
+    return errors
 
 
 def _duplicate_hash_errors(records: Sequence[ValidatedRecord]) -> list[str]:
@@ -261,7 +268,7 @@ def validate_media(path: Path) -> MediaIntegrity:
     """Validate and fingerprint one final image."""
     try:
         stat = path.stat()
-    except OSError as exc:
+    except (OSError, ValueError) as exc:
         raise IntegrityError(f"media is missing or unreadable: {path}: {exc}") from exc
     if not path.is_file():
         raise IntegrityError(f"media is not a file: {path}")

@@ -316,6 +316,33 @@ def test_validate_records_detects_duplicate_paths_when_media_is_missing(
     assert "data/a.png, data/second.png" in message
 
 
+def test_validate_records_aggregates_symlink_loop_resolution_and_media_errors(
+    tmp_path: Path,
+) -> None:
+    loop_path = tmp_path / "loop.png"
+    loop_path.symlink_to(loop_path)
+    missing_path = tmp_path / "missing.png"
+    loop = _terminal(
+        tmp_path,
+        filepath=loop_path,
+        relative_filepath="data/loop.png",
+    )
+    missing = _terminal(
+        tmp_path,
+        filepath=missing_path,
+        relative_filepath="data/missing.png",
+        source_id="source-b",
+    )
+
+    with pytest.raises(IntegrityError) as caught:
+        validate_records([(loop, _enrichment()), (missing, _enrichment())])
+
+    message = str(caught.value)
+    assert "data/loop.png: could not resolve canonical path" in message
+    assert f"media is missing or unreadable: {loop_path}" in message
+    assert f"media is missing or unreadable: {missing_path}" in message
+
+
 def test_validate_mounts_uses_injected_mount_predicate() -> None:
     required = [Path("/Volumes/Extreme SSD"), Path("/Volumes/CameraTrapPython")]
     inspected: list[Path] = []
