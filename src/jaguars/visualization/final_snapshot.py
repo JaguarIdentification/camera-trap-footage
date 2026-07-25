@@ -113,6 +113,10 @@ class PublishedSnapshotCleanupError(SnapshotReplacementError):
         self.published_dataset = dataset
 
 
+class _ReconciliationQueryError(SnapshotReplacementError):
+    """Raised when database state remains unknown after bounded retries."""
+
+
 @dataclass(frozen=True)
 class _OwnedDataset:
     dataset_id: Any
@@ -397,9 +401,9 @@ def _query_document_by_id_with_retry(dataset_id: Any) -> dict[str, Any] | None:
     for attempt in range(3):
         try:
             return _database_document_by_id(dataset_id)
-        except BaseException:
+        except BaseException as query_error:
             if attempt == 2:
-                raise
+                raise _ReconciliationQueryError(f"could not query dataset ID {dataset_id!r} during reconciliation") from query_error
     raise AssertionError("unreachable")
 
 
@@ -407,9 +411,9 @@ def _query_document_by_name_with_retry(name: str) -> dict[str, Any] | None:
     for attempt in range(3):
         try:
             return _database_document_by_name(name)
-        except BaseException:
+        except BaseException as query_error:
             if attempt == 2:
-                raise
+                raise _ReconciliationQueryError(f"could not query dataset name {name!r} during reconciliation") from query_error
     raise AssertionError("unreachable")
 
 
@@ -684,13 +688,27 @@ def _promote_replacement(
                 backup_name,
                 first_rename_error,
             )
-        finally:
+        except _ReconciliationQueryError as query_error:
+            raise SnapshotReplacementError(
+                f"backup rename outcome is unknown; retained owned staging "
+                f"dataset ID {ownership.dataset_id!r} with ownership token "
+                f"{ownership.token!r}, and expected pinned-old backup "
+                f"{backup_name!r}, as recoverable artifacts"
+            ) from query_error
+        except BaseException:
             _delete_owned_for_recovery(
                 staged,
                 ownership,
                 backup_name,
                 first_rename_error,
             )
+            raise
+        _delete_owned_for_recovery(
+            staged,
+            ownership,
+            backup_name,
+            first_rename_error,
+        )
         raise
 
     try:

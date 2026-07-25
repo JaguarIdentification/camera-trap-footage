@@ -977,6 +977,62 @@ def test_persisted_old_rename_with_transient_recovery_queries_restores_final(
     fo.delete_dataset(final_name)
 
 
+def test_inconclusive_backup_rename_recovery_retains_both_artifacts(
+    tmp_path: Path,
+    dataset_names: tuple[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    final_name, temporary_name = dataset_names
+    original, _, _ = _existing_snapshot(tmp_path, final_name)
+    original_id = original._doc.id
+    real_rename = final_snapshot._rename_dataset
+    real_query_by_id = final_snapshot._database_document_by_id
+    rename_calls = 0
+
+    def persist_then_raise(dataset: fo.Dataset, name: str) -> None:
+        nonlocal rename_calls
+        rename_calls += 1
+        real_rename(dataset, name)
+        if rename_calls == 1:
+            raise RuntimeError("ambiguous persisted old rename")
+
+    def fail_all_original_queries(dataset_id: object) -> dict[str, object] | None:
+        if dataset_id == original_id:
+            raise RuntimeError("database unavailable throughout reconciliation")
+        return real_query_by_id(dataset_id)
+
+    monkeypatch.setattr(final_snapshot, "_rename_dataset", persist_then_raise)
+    monkeypatch.setattr(
+        final_snapshot,
+        "_database_document_by_id",
+        fail_all_original_queries,
+    )
+
+    with pytest.raises(
+        SnapshotReplacementError,
+        match="retained owned staging.*ownership token.*recoverable artifacts",
+    ):
+        _create_snapshot(
+            [_validated_record(tmp_path)],
+            final_name,
+            temporary_name,
+            replace_existing=True,
+            expected_original_id=original_id,
+        )
+
+    original_document = real_query_by_id(original_id)
+    assert original_document is not None
+    assert original_document["name"] == final_name or str(original_document["name"]).startswith(f"{temporary_name}--backup-")
+    build_names = _database_names_with_prefix(f"{temporary_name}--build-")
+    assert len(build_names) == 1
+    build_document = _database_document(build_names[0])
+    assert build_document is not None
+    assert build_document["info"][final_snapshot.OWNERSHIP_INFO_KEY] is not None
+
+    fo.delete_dataset(str(original_document["name"]))
+    fo.delete_dataset(build_names[0])
+
+
 def test_transactional_replacement_promotion_failure_after_database_save_restores_old_final(
     tmp_path: Path,
     dataset_names: tuple[str, str],
