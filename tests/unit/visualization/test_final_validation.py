@@ -148,6 +148,18 @@ def test_validate_annotations_accepts_normalized_boxes_and_mask(tmp_path: Path) 
     validate_annotations(_terminal(tmp_path))
 
 
+def test_validate_annotations_rejects_malformed_nonempty_serialized_mask(
+    tmp_path: Path,
+) -> None:
+    terminal = _terminal(tmp_path, mask="not-a-serialized-mask")
+
+    with pytest.raises(
+        IntegrityError,
+        match=r"segmentations_body\.detections\[0\]\.mask.*decode",
+    ):
+        validate_annotations(terminal)
+
+
 @pytest.mark.parametrize(
     "invalid",
     [
@@ -181,6 +193,55 @@ def _enrichment() -> Enrichment:
         match_method="source_id",
         fields=MappingProxyType({"sighting_id": "S1"}),
     )
+
+
+@pytest.mark.parametrize(
+    ("fields", "expected_message"),
+    [
+        ({"closed_set_split": "development"}, "closed_set_split"),
+        ({"open_set_split": 7}, "open_set_split"),
+        ({"site": 7}, "site"),
+        ({"latitude": True}, "latitude"),
+        ({"longitude": float("inf")}, "longitude"),
+    ],
+)
+def test_validate_records_rejects_invalid_populated_enrichment_scalars(
+    tmp_path: Path,
+    fields: dict[str, object],
+    expected_message: str,
+) -> None:
+    image_path = tmp_path / "a.png"
+    Image.new("RGB", (8, 6)).save(image_path)
+    enrichment = Enrichment(
+        status="matched",
+        match_method="source_id",
+        fields=MappingProxyType(cast(dict[str, Any], fields)),
+    )
+
+    with pytest.raises(IntegrityError, match=expected_message):
+        validate_records(
+            [(_terminal(tmp_path, filepath=image_path), enrichment)],
+        )
+
+
+def test_validate_records_allows_missing_split_values(tmp_path: Path) -> None:
+    image_path = tmp_path / "a.png"
+    Image.new("RGB", (8, 6)).save(image_path)
+
+    records = validate_records(
+        [
+            (
+                _terminal(tmp_path, filepath=image_path),
+                Enrichment(
+                    status="matched",
+                    match_method="source_id",
+                    fields=MappingProxyType({}),
+                ),
+            )
+        ],
+    )
+
+    assert len(records) == 1
 
 
 def _validated(

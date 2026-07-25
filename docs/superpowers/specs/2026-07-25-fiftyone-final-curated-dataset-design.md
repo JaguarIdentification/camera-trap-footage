@@ -52,7 +52,9 @@ Generated state stays on external storage:
 
 Creation refuses to run unless `/Volumes/Extreme SSD` and `/Volumes/CameraTrapPython` are actual mounted filesystems and every configured generated-state path resolves below `/Volumes/CameraTrapPython/fiftyone`.
 
-The snapshot is immutable during ordinary operation. If the final dataset already exists, creation fails. Replacement requires `--overwrite`, prints existing and proposed sample counts, and requires interactive confirmation. Noninteractive replacement additionally requires `--yes`. Replacement first builds and validates an ownership-unique staging dataset while the old final remains published. The generated staging name is collision-checked before construction, and the adapter persists an unguessable ownership token in dataset metadata before any destructive cleanup or promotion is permitted. It then renames the old final to an ownership-unique backup, promotes staging, and deletes the backup only after successful promotion. Promotion failure re-queries database names and IDs, removes a promoted dataset only when its persisted ID and token prove ownership, restores the old final when the name is available, and never deletes a foreign claimant. Once promotion is database-verified, the transaction enters a published phase: any old-backup deletion error is classified by a database re-query, reports whether the backup remains recoverable or was already removed, and never removes the valid new final. Media is never deleted.
+FiftyOne is configured before import. An inherited database URI or private database port is rejected, an existing config file may not redirect the database, and the imported FiftyOne configuration is revalidated against the exact approved database directory.
+
+The snapshot is immutable during ordinary operation. If the final dataset already exists, creation fails. Replacement requires `--overwrite`, prints existing and proposed sample counts, and requires interactive confirmation. Noninteractive replacement additionally requires `--yes`. Confirmation pins the persisted ID of the original final dataset. Replacement first builds and validates an ownership-unique staging dataset while the old final remains published, then compare-and-swaps only if that exact original ID still owns the final name. The generated staging name is collision-checked before construction, and the adapter persists an unguessable ownership token in dataset metadata before any destructive cleanup or promotion is permitted. It then renames the old final to an ownership-unique backup, promotes staging, and deletes the backup only after successful promotion. Promotion failure re-queries database names and IDs, removes a promoted dataset only when its persisted ID and token prove ownership, restores the old final when the name is available, and never deletes a foreign claimant. Once promotion is database-verified, the transaction enters a published phase: any old-backup deletion error is classified by a database re-query, reports whether the backup remains recoverable or was already removed, and never removes the valid new final. Media is never deleted.
 
 ## Atomic creation
 
@@ -102,7 +104,7 @@ Creation fails if:
 
 Missing and ambiguous lineage are reported but are not fatal.
 
-Each run report records resolved paths, source and constructed counts, hash and media validation, lineage counts and methods, field-population counts, saved-view creation, and any failure.
+Each run report records the exact upstream export and manifest paths, terminal and resolved identity counts separately, source and constructed counts, annotation/enrichment/media failures, duplicate-path and duplicate-hash group and pair counts, lineage counts and methods, saved-view creation, the phase reached, and any failure.
 
 ## Components
 
@@ -114,7 +116,7 @@ The implementation uses focused modules under `jaguars.visualization`:
 - Snapshot creation maps validated records to FiftyOne samples, creates saved views, and performs the atomic rename.
 - The CLI owns storage configuration, mode validation, reporting, overwrite confirmation, and App lifecycle.
 
-Pure parsing, enrichment, and validation code remains independently testable without FiftyOne database state.
+Pure parsing, enrichment, and validation code remains independently testable without importing FiftyOne. Validation rejects malformed masks and bounding boxes, unsupported split values, and non-finite or incorrectly typed scalar enrichment values.
 
 ## Testing and acceptance
 
@@ -122,7 +124,15 @@ Unit tests cover export parsing, exact and ambiguous lineage joins, schema mappi
 
 An integration test uses a temporary isolated FiftyOne database and image fixtures to verify atomic creation, schema, annotations, saved views, immutability, token-proven cleanup, generated-name collisions, constructor races, and rename failures both before and after database persistence. Tests never connect to or mutate the production database.
 
-Before production creation, a real-data `--dry-run` must verify:
+Before production creation, a real-data `--dry-run` must verify the acceptance targets below. The current read-only mounted-data audit deliberately fails eligibility while reporting:
+
+- 1,367 terminal samples, with exactly 1,120 populated and 247 null terminal identities
+- 15 annotation-invalid samples
+- no enrichment-invalid or unreadable-media samples
+- 1,367 unique media paths
+- 1,328 unique SHA-256 values and 39 duplicate-hash pairs
+
+Production creation remains blocked until the annotation and duplicate-content failures are corrected. Its acceptance targets are:
 
 - 1,367 terminal samples discovered
 - 1,120 terminal identities populated and all 247 null terminal identities preserved unless uniquely resolved by exact lineage

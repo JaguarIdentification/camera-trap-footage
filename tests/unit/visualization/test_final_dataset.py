@@ -4,6 +4,7 @@ from collections.abc import Sequence
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from types import MappingProxyType
 from typing import Any, cast
 
@@ -11,6 +12,8 @@ import pytest
 
 from jaguars.visualization.final_dataset import (
     Audit,
+    AuditError,
+    AuditValidation,
     DEFAULT_ADDRESS,
     DEFAULT_DATABASE_DIR,
     DEFAULT_DATASET_DIR,
@@ -33,11 +36,17 @@ from jaguars.visualization.final_dataset import (
     launch_and_wait,
     parse_args,
     run,
+    validate_imported_fiftyone_configuration,
     write_report,
 )
 from jaguars.visualization.final_lineage import Enrichment
 from jaguars.visualization.final_records import TerminalRecord
-from jaguars.visualization.final_validation import MediaIntegrity, ValidatedRecord
+from jaguars.visualization.final_validation import (
+    IntegrityError,
+    MediaIntegrity,
+    StorageSafetyError,
+    ValidatedRecord,
+)
 
 
 def test_cli_and_runtime_defaults_are_the_approved_final_snapshot_values() -> None:
@@ -132,6 +141,76 @@ def test_fiftyone_paths_are_configured_before_any_lazy_import(tmp_path: Path) ->
     assert os.environ["FIFTYONE_PLUGINS_DIR"] == str(paths.plugins_dir)
 
 
+@pytest.mark.parametrize(
+    "unsafe_key",
+    [
+        "FIFTYONE_DATABASE_URI",
+        "FIFTYONE_PRIVATE_DATABASE_PORT",
+    ],
+)
+def test_fiftyone_configuration_rejects_inherited_external_connection_environment(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    unsafe_key: str,
+) -> None:
+    paths = _runtime_paths(tmp_path)
+    monkeypatch.setenv(unsafe_key, "mongodb://foreign.example:27017" if unsafe_key.endswith("URI") else "27018")
+
+    with pytest.raises(StorageSafetyError, match=unsafe_key):
+        configure_fiftyone_environment(paths)
+
+
+@pytest.mark.parametrize(
+    ("config_payload", "expected_message"),
+    [
+        ({"database_uri": "mongodb://foreign.example:27017"}, "database_uri"),
+        ({"database_dir": "/tmp/foreign-fiftyone"}, "database_dir"),
+    ],
+)
+def test_fiftyone_configuration_rejects_external_connection_state_in_config_file(
+    tmp_path: Path,
+    config_payload: dict[str, str],
+    expected_message: str,
+) -> None:
+    paths = _runtime_paths(tmp_path)
+    paths.config_path.parent.mkdir(parents=True)
+    paths.config_path.write_text(json.dumps(config_payload), encoding="utf-8")
+
+    with pytest.raises(StorageSafetyError, match=expected_message):
+        configure_fiftyone_environment(paths)
+
+
+@pytest.mark.parametrize(
+    ("database_uri", "private_port", "database_dir", "expected_message"),
+    [
+        ("mongodb://foreign.example:27017", None, None, "database_uri"),
+        (None, "27018", None, "FIFTYONE_PRIVATE_DATABASE_PORT"),
+        (None, None, "/tmp/foreign-fiftyone", "database_dir"),
+    ],
+)
+def test_post_import_fiftyone_configuration_must_match_approved_database(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    database_uri: str | None,
+    private_port: str | None,
+    database_dir: str | None,
+    expected_message: str,
+) -> None:
+    paths = _runtime_paths(tmp_path)
+    monkeypatch.delenv("FIFTYONE_PRIVATE_DATABASE_PORT", raising=False)
+    if private_port is not None:
+        monkeypatch.setenv("FIFTYONE_PRIVATE_DATABASE_PORT", private_port)
+    fake_fiftyone = SimpleNamespace(
+        config=SimpleNamespace(
+            database_uri=database_uri,
+            database_dir=database_dir or str(paths.database_dir),
+        )
+    )
+
+    with pytest.raises(StorageSafetyError, match=expected_message):
+        validate_imported_fiftyone_configuration(fake_fiftyone, paths.database_dir)
+
+
 def _runtime_paths(tmp_path: Path) -> RuntimePaths:
     state_root = tmp_path / "state"
     return RuntimePaths(
@@ -195,7 +274,10 @@ def _services(
         audit=lambda paths: events.append("audit") or audit,
         dataset_exists=lambda name: events.append("exists") or existing,
         load_dataset=lambda name: events.append("load") or dataset,
-        create_snapshot=lambda records, name, temporary, replace_existing: events.append(f"create:{'replace' if replace_existing else 'new'}")
+        dataset_id=lambda snapshot: events.append("pin-id") or "original-dataset-id",
+        create_snapshot=lambda records, name, temporary, replace_existing, expected_original_id: events.append(
+            f"create:{'replace' if replace_existing else 'new'}:{expected_original_id}"
+        )
         or dataset,
         verify_snapshot=lambda snapshot, records: events.append("verify")
         or SnapshotSummary(
@@ -221,7 +303,7 @@ def test_dry_run_audits_and_reports_without_fiftyone_services(tmp_path: Path) ->
             **services.__dict__,
             "dataset_exists": lambda name: pytest.fail("dry-run connected to FiftyOne"),
             "load_dataset": lambda name: pytest.fail("dry-run connected to FiftyOne"),
-            "create_snapshot": lambda records, name, temporary, replace_existing: pytest.fail("dry-run connected to FiftyOne"),
+            "create_snapshot": lambda records, name, temporary, replace_existing, expected_original_id: pytest.fail("dry-run connected to FiftyOne"),
             "verify_snapshot": lambda snapshot, records: pytest.fail("dry-run connected to FiftyOne"),
             "launch": lambda snapshot, address, port: pytest.fail("dry-run launched the App"),
         }
@@ -289,7 +371,7 @@ def test_default_mode_audits_creates_reports_then_launches(tmp_path: Path) -> No
         "validate",
         "audit",
         "exists",
-        "create:new",
+        "create:new:None",
         "verify",
         "report",
         "launch",
@@ -341,13 +423,27 @@ def test_overwrite_audits_and_confirms_before_transactional_replacement(
         == 0
     )
 
-    significant = [event for event in events if event in {"validate", "audit", "exists", "load", "create:replace", "verify"}]
+    significant = [
+        event
+        for event in events
+        if event
+        in {
+            "validate",
+            "audit",
+            "exists",
+            "load",
+            "pin-id",
+            "create:replace:original-dataset-id",
+            "verify",
+        }
+    ]
     assert significant == [
         "validate",
         "audit",
         "exists",
         "load",
-        "create:replace",
+        "pin-id",
+        "create:replace:original-dataset-id",
         "verify",
     ]
     assert reports[0].counts["constructed"] == 1
@@ -376,10 +472,10 @@ def test_yes_overwrite_is_noninteractive_but_still_prints_counts(tmp_path: Path)
 
     assert "print:Existing dataset samples: 1200" in events
     assert "print:Proposed dataset samples: 1" in events
-    assert "create:replace" in events
+    assert "create:replace:original-dataset-id" in events
 
 
-def test_build_validated_records_loads_terminal_and_all_lineage_then_validates_expected_count(
+def test_build_validated_records_honors_exact_configured_lineage_paths(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -404,8 +500,8 @@ def test_build_validated_records_loads_terminal_and_all_lineage_then_validates_e
     )
     monkeypatch.setattr(
         final_dataset,
-        "load_lineage_candidates",
-        lambda intermediate_dir: events.append(("lineage", intermediate_dir)) or (candidate,),
+        "load_lineage_candidates_from_paths",
+        lambda export_dirs, manifest_paths: events.append(("lineage", tuple(export_dirs), tuple(manifest_paths))) or (candidate,),
     )
     monkeypatch.setattr(
         final_dataset.LineageIndex,
@@ -423,15 +519,63 @@ def test_build_validated_records_loads_terminal_and_all_lineage_then_validates_e
 
     monkeypatch.setattr(final_dataset, "validate_records", validate)
 
-    audit = build_validated_records(paths, expected_count=1)
+    audit = build_validated_records(
+        paths,
+        expected_count=1,
+        expected_terminal_identity_populated=1,
+        expected_terminal_identity_null=0,
+    )
 
-    assert audit == Audit(records=(validated,), terminal_count=1, lineage_candidate_count=1)
+    assert audit == Audit(
+        records=(validated,),
+        terminal_count=1,
+        lineage_candidate_count=1,
+        terminal_identity_populated=1,
+        terminal_identity_null=0,
+        resolved_identity_populated=1,
+        resolved_identity_null=0,
+        validation=AuditValidation(
+            unique_paths=1,
+            unique_sha256=1,
+        ),
+    )
     assert events == [
         ("terminal", paths.terminal_export_dir),
-        ("lineage", paths.intermediate_dir),
+        ("lineage", paths.upstream_export_dirs, paths.manifest_paths),
         ("index", (candidate,)),
         ("validate-records", ((terminal, enrichment),), 1),
     ]
+
+
+def test_build_validated_records_enforces_frozen_terminal_identity_counts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from jaguars.visualization import final_dataset
+
+    paths = _runtime_paths(tmp_path)
+    terminal = _record(tmp_path).terminal
+    monkeypatch.setattr(
+        final_dataset,
+        "load_terminal_records",
+        lambda export_dir: [terminal],
+    )
+    monkeypatch.setattr(
+        final_dataset,
+        "load_lineage_candidates_from_paths",
+        lambda export_dirs, manifest_paths: (),
+    )
+
+    with pytest.raises(
+        IntegrityError,
+        match="expected 0 populated terminal identities, found 1",
+    ):
+        build_validated_records(
+            paths,
+            expected_count=1,
+            expected_terminal_identity_populated=0,
+            expected_terminal_identity_null=1,
+        )
 
 
 def test_reports_serialize_success_and_failure_and_atomically_publish_latest(tmp_path: Path) -> None:
@@ -494,6 +638,135 @@ def test_report_identity_population_counts_only_resolved_values(tmp_path: Path) 
 
     assert report.field_population["jaguar_id"] == 1
     assert report.field_population["ground_truth"] == 1
+
+
+def test_report_separates_frozen_terminal_and_resolved_identity_counts(
+    tmp_path: Path,
+) -> None:
+    record = _record(tmp_path)
+    unresolved = replace(
+        record,
+        terminal=replace(record.terminal, jaguar_id=None),
+        enrichment=replace(
+            record.enrichment,
+            status="missing",
+            match_method=None,
+            fields=MappingProxyType({}),
+        ),
+    )
+    resolved = replace(
+        unresolved,
+        enrichment=replace(
+            record.enrichment,
+            fields=MappingProxyType({"jaguar_id": "F11"}),
+        ),
+    )
+
+    report = RunReport.from_audit(
+        Audit(
+            records=(unresolved, resolved),
+            terminal_count=2,
+            lineage_candidate_count=1,
+            terminal_identity_populated=0,
+            terminal_identity_null=2,
+            resolved_identity_populated=1,
+            resolved_identity_null=1,
+        )
+    )
+
+    assert report.counts["terminal_identity_populated"] == 0
+    assert report.counts["terminal_identity_null"] == 2
+    assert report.counts["resolved_identity_populated"] == 1
+    assert report.counts["resolved_identity_null"] == 1
+
+
+def test_audit_failure_report_retains_partial_counts_and_failed_validation_state(
+    tmp_path: Path,
+) -> None:
+    events: list[str] = []
+    reports: list[RunReport] = []
+    record = _record(tmp_path)
+    partial = Audit(
+        records=(record,),
+        terminal_count=2,
+        lineage_candidate_count=6,
+        terminal_identity_populated=1,
+        terminal_identity_null=1,
+        resolved_identity_populated=1,
+        resolved_identity_null=1,
+        validation=AuditValidation(
+            annotation_failed=1,
+            media_failed=1,
+            duplicate_hash_groups=1,
+            duplicate_hash_pairs=1,
+            unique_paths=1,
+            unique_sha256=1,
+            errors=("malformed bbox", "missing media", "duplicate hash"),
+        ),
+    )
+    services = _services(
+        events=events,
+        reports=reports,
+        audit=partial,
+    )
+    services = Services(
+        **{
+            **services.__dict__,
+            "audit": lambda paths: (_ for _ in ()).throw(AuditError("real audit failed", partial)),
+        }
+    )
+
+    with pytest.raises(AuditError, match="real audit failed"):
+        run(
+            parse_args(["--dry-run"]),
+            services=services,
+            paths=_runtime_paths(tmp_path),
+        )
+
+    failure = reports[-1]
+    assert failure.status == "failed"
+    assert failure.counts["terminal"] == 2
+    assert failure.counts["validated"] == 1
+    assert failure.counts["annotation_failed"] == 1
+    assert failure.counts["media_failed"] == 1
+    assert failure.hash_validation == {
+        "status": "not_completed",
+        "unique_sha256": 1,
+        "validated": 1,
+        "duplicate_groups": 1,
+        "duplicate_pairs": 1,
+    }
+    assert failure.media_validation["status"] == "failed"
+
+
+def test_launch_failure_report_retains_verified_snapshot_summary(
+    tmp_path: Path,
+) -> None:
+    events: list[str] = []
+    reports: list[RunReport] = []
+    audit = Audit(
+        records=(_record(tmp_path),),
+        terminal_count=1,
+        lineage_candidate_count=6,
+    )
+    services = _services(events=events, reports=reports, audit=audit)
+    services = Services(
+        **{
+            **services.__dict__,
+            "launch": lambda snapshot, address, port: (_ for _ in ()).throw(RuntimeError("App launch failed")),
+        }
+    )
+
+    with pytest.raises(RuntimeError, match="App launch failed"):
+        run(parse_args([]), services=services, paths=_runtime_paths(tmp_path))
+
+    failure = reports[-1]
+    assert failure.status == "failed"
+    assert failure.counts["constructed"] == 1
+    assert failure.views == {
+        "status": "created",
+        "names": ["All final samples"],
+    }
 
 
 def test_app_session_closes_after_wait_and_keyboard_interrupt() -> None:

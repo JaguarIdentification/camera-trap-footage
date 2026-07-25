@@ -488,19 +488,28 @@ def load_export_candidates(export_dir: Path) -> tuple[LineageCandidate, ...]:
     return tuple(candidates)
 
 
-def load_lineage_candidates(intermediate_dir: Path) -> tuple[LineageCandidate, ...]:
-    """Load the approved upstream exports and terminal split manifests."""
-    fiftyone_root = intermediate_dir / "fo_jaguars"
-    export_dirs = (
-        fiftyone_root / "exports/segmented_deduplicated",
-        fiftyone_root / "exports/segmented",
-        fiftyone_root / "exports/deduplicated",
-        fiftyone_root / "ingested",
-    )
-    manifest_paths = (
-        intermediate_dir / "labels_with_splits.csv",
-        intermediate_dir / "pptx_extracted_labels_with_splits.csv",
-    )
+def load_lineage_candidates_from_paths(
+    export_dirs: Iterable[Path],
+    manifest_paths: Iterable[Path],
+) -> tuple[LineageCandidate, ...]:
+    """Load lineage only from the caller-approved export and manifest paths."""
     export_candidates = (candidate for export_dir in export_dirs for candidate in load_export_candidates(export_dir))
     manifest_candidates = (candidate for manifest_path in manifest_paths for candidate in load_manifest_candidates(manifest_path))
     return tuple((*export_candidates, *manifest_candidates))
+
+
+def load_lineage_candidates(intermediate_dir: Path) -> tuple[LineageCandidate, ...]:
+    """Load conventional v1 lineage paths for compatibility callers."""
+    fiftyone_root = intermediate_dir / "fo_jaguars"
+    return load_lineage_candidates_from_paths(
+        (
+            fiftyone_root / "exports/segmented_deduplicated",
+            fiftyone_root / "exports/segmented",
+            fiftyone_root / "exports/deduplicated",
+            fiftyone_root / "ingested",
+        ),
+        (
+            intermediate_dir / "labels_with_splits.csv",
+            intermediate_dir / "pptx_extracted_labels_with_splits.csv",
+        ),
+    )

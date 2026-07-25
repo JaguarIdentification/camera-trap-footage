@@ -1,6 +1,10 @@
 import hashlib
+import io
 import math
 import os
+import zlib
+from base64 import b64decode
+from binascii import Error as Base64Error
 from collections.abc import Callable, Hashable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -8,6 +12,8 @@ from typing import Any, TypeVar
 
 from PIL import Image, UnidentifiedImageError
 from PIL.Image import DecompressionBombError
+import numpy as np
+from numpy.typing import NDArray
 
 from jaguars.visualization.final_lineage import Enrichment
 from jaguars.visualization.final_records import FrozenAnnotation, TerminalRecord
@@ -24,6 +30,34 @@ class IntegrityError(ValueError):
 
 class StorageSafetyError(ValueError):
     """Raised when required mounts or generated-state paths are unsafe."""
+
+
+@dataclass(frozen=True)
+class ValidationDiagnostics:
+    annotation_failed: int = 0
+    enrichment_failed: int = 0
+    media_failed: int = 0
+    duplicate_path_groups: int = 0
+    duplicate_path_pairs: int = 0
+    duplicate_hash_groups: int = 0
+    duplicate_hash_pairs: int = 0
+    unique_paths: int | None = None
+    unique_sha256: int | None = None
+    errors: tuple[str, ...] = ()
+
+
+class BatchValidationError(IntegrityError):
+    """Raised with partial records and categorized batch diagnostics."""
+
+    def __init__(
+        self,
+        message: str,
+        records: Sequence["ValidatedRecord"],
+        diagnostics: ValidationDiagnostics,
+    ) -> None:
+        super().__init__(message)
+        self.records = tuple(records)
+        self.diagnostics = diagnostics
 
 
 @dataclass(frozen=True)
@@ -86,12 +120,33 @@ def _validate_bbox(value: object) -> str | None:
     return None
 
 
-def _is_nonempty_serialized_mask(mask: object) -> bool:
-    if isinstance(mask, str):
-        return bool(mask.strip())
-    if isinstance(mask, (Mapping, Sequence)) and not isinstance(mask, bytes):
-        return bool(mask)
-    return False
+def _decoded_mask(mask: object) -> NDArray[np.generic]:
+    if isinstance(mask, Mapping):
+        binary = mask.get("$binary")
+        if not isinstance(binary, Mapping):
+            raise ValueError("mapping must contain a $binary object")
+        encoded = binary.get("base64")
+        if not isinstance(encoded, str) or not encoded:
+            raise ValueError("$binary.base64 must be a nonempty string")
+        serialized = b64decode(encoded, validate=True)
+        with io.BytesIO(zlib.decompress(serialized)) as stream:
+            decoded = np.load(stream, allow_pickle=False)
+    elif isinstance(mask, str):
+        serialized = b64decode(mask, validate=True)
+        with io.BytesIO(zlib.decompress(serialized)) as stream:
+            decoded = np.load(stream, allow_pickle=False)
+    elif isinstance(mask, Sequence) and not isinstance(mask, (str, bytes)):
+        decoded = np.asarray(mask)
+    else:
+        raise ValueError("mask must be serialized binary data or an array")
+
+    if not isinstance(decoded, np.ndarray) or decoded.ndim != 2:
+        raise ValueError("mask must decode to a two-dimensional array")
+    if decoded.dtype.kind not in ("b", "i", "u"):
+        raise ValueError("mask must decode to boolean or integer values")
+    if decoded.size == 0 or not np.logical_or(decoded == 0, decoded == 1).all():
+        raise ValueError("mask must decode to nonempty binary values")
+    return decoded
 
 
 def validate_annotations(terminal: TerminalRecord) -> None:
@@ -120,8 +175,10 @@ def validate_annotations(terminal: TerminalRecord) -> None:
             message = _validate_bbox(detection["bounding_box"])
             if message is not None:
                 errors.append(f"{context}: segmentations_body.detections[{index}].bounding_box " f"{message}")
-        if not _is_nonempty_serialized_mask(detection.get("mask")):
-            errors.append(f"{context}: segmentations_body.detections[{index}].mask " "must be nonempty serialized data")
+        try:
+            _decoded_mask(detection.get("mask"))
+        except (Base64Error, OSError, ValueError, zlib.error) as error:
+            errors.append(f"{context}: segmentations_body.detections[{index}].mask could not decode: {error}")
 
     if errors:
         raise IntegrityError("; ".join(errors))
@@ -133,11 +190,54 @@ def validate_record(
 ) -> ValidatedRecord:
     """Validate and aggregate one terminal record."""
     validate_annotations(terminal)
+    validate_enrichment(enrichment, terminal.relative_filepath)
     return ValidatedRecord(
         terminal=terminal,
         enrichment=enrichment,
         integrity=validate_media(terminal.filepath),
     )
+
+
+_STRING_ENRICHMENT_FIELDS = (
+    "jaguar_id",
+    "sighting_id",
+    "site",
+    "location",
+    "camera_id",
+    "camera_side",
+    "camera_model",
+    "capture_date",
+    "capture_time",
+    "capture_datetime",
+    "original_filename",
+    "source_media_path",
+    "source_type",
+)
+_SPLIT_FIELDS = ("closed_set_split", "open_set_split")
+_APPROVED_SPLITS = frozenset(("train", "val", "test"))
+_COORDINATE_FIELDS = ("latitude", "longitude")
+
+
+def validate_enrichment(
+    enrichment: Enrichment,
+    context: str,
+) -> None:
+    """Validate approved enrichment values without importing FiftyOne."""
+    errors: list[str] = []
+    for field_name in _STRING_ENRICHMENT_FIELDS:
+        value = enrichment.fields.get(field_name)
+        if value is not None and (not isinstance(value, str) or not value.strip()):
+            errors.append(f"{context}: {field_name} must be a nonempty string when populated")
+    for field_name in _SPLIT_FIELDS:
+        value = enrichment.fields.get(field_name)
+        if value is not None and (not isinstance(value, str) or value not in _APPROVED_SPLITS):
+            errors.append(f"{context}: {field_name} must be one of train, val, test when populated")
+    for field_name in _COORDINATE_FIELDS:
+        value = enrichment.fields.get(field_name)
+        if value is not None and (isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value)):
+            errors.append(f"{context}: {field_name} must be a finite numeric value when populated")
+    if errors:
+        raise IntegrityError("; ".join(errors))
 
 
 def _duplicate_groups(
@@ -167,6 +267,24 @@ def _duplicate_path_errors(records: Sequence[TerminalRecord]) -> list[str]:
 
     errors.extend(f"duplicate canonical path {path}: {_record_names(matches)}" for path, matches in grouped.items() if len(matches) > 1)
     return errors
+
+
+def _path_diagnostics(
+    records: Sequence[TerminalRecord],
+) -> tuple[int, int, int]:
+    grouped: dict[Path, int] = {}
+    for record in records:
+        try:
+            canonical_path = record.filepath.resolve()
+        except (OSError, RuntimeError, ValueError):
+            continue
+        grouped[canonical_path] = grouped.get(canonical_path, 0) + 1
+    duplicate_sizes = [size for size in grouped.values() if size > 1]
+    return (
+        len(grouped),
+        len(duplicate_sizes),
+        sum(size * (size - 1) // 2 for size in duplicate_sizes),
+    )
 
 
 def _duplicate_hash_errors(records: Sequence[ValidatedRecord]) -> list[str]:
@@ -199,6 +317,9 @@ def validate_records(
     """Validate a complete terminal/enrichment batch."""
     errors: list[str] = []
     validated: list[ValidatedRecord] = []
+    annotation_failed = 0
+    enrichment_failed = 0
+    media_failed = 0
     if expected_count is not None:
         try:
             validate_expected_count(len(records), expected_count)
@@ -210,10 +331,17 @@ def validate_records(
         try:
             validate_annotations(terminal)
         except IntegrityError as exc:
+            annotation_failed += 1
+            errors.append(str(exc))
+        try:
+            validate_enrichment(enrichment, terminal.relative_filepath)
+        except IntegrityError as exc:
+            enrichment_failed += 1
             errors.append(str(exc))
         try:
             integrity = validate_media(terminal.filepath)
         except IntegrityError as exc:
+            media_failed += 1
             errors.append(str(exc))
         else:
             validated.append(
@@ -224,10 +352,30 @@ def validate_records(
                 )
             )
 
-    errors.extend(_duplicate_hash_errors(validated))
+    duplicate_hashes = _duplicate_groups(
+        validated,
+        lambda record: record.integrity.sha256,
+    )
+    errors.extend(f"duplicate SHA-256 {digest}: {_record_names([record.terminal for record in matches])}" for digest, matches in duplicate_hashes)
 
     if errors:
-        raise IntegrityError("; ".join(errors))
+        unique_paths, duplicate_path_groups, duplicate_path_pairs = _path_diagnostics([terminal for terminal, _ in records])
+        raise BatchValidationError(
+            "; ".join(errors),
+            validated,
+            ValidationDiagnostics(
+                annotation_failed=annotation_failed,
+                enrichment_failed=enrichment_failed,
+                media_failed=media_failed,
+                duplicate_path_groups=duplicate_path_groups,
+                duplicate_path_pairs=duplicate_path_pairs,
+                duplicate_hash_groups=len(duplicate_hashes),
+                duplicate_hash_pairs=sum(len(matches) * (len(matches) - 1) // 2 for _, matches in duplicate_hashes),
+                unique_paths=unique_paths,
+                unique_sha256=len({record.integrity.sha256 for record in validated}),
+                errors=tuple(errors),
+            ),
+        )
     return validated
 
 

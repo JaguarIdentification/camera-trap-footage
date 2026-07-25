@@ -16,11 +16,16 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any, TypeVar, overload
 
-from jaguars.visualization.final_lineage import LineageIndex, load_lineage_candidates
+from jaguars.visualization.final_lineage import (
+    LineageIndex,
+    load_lineage_candidates_from_paths,
+)
 from jaguars.visualization.final_records import TerminalExportError, load_terminal_records
 from jaguars.visualization.final_validation import (
+    BatchValidationError,
     IntegrityError,
     StorageSafetyError,
+    ValidationDiagnostics,
     ValidatedRecord,
     validate_mounts,
     validate_records,
@@ -51,6 +56,8 @@ DEFAULT_MOUNT_ROOTS = (Path("/Volumes/Extreme SSD"), Path("/Volumes/CameraTrapPy
 DEFAULT_ADDRESS = "localhost"
 DEFAULT_PORT = 5151
 EXPECTED_SAMPLE_COUNT = 1367
+EXPECTED_TERMINAL_IDENTITY_POPULATED = 1120
+EXPECTED_TERMINAL_IDENTITY_NULL = 247
 _REPORT_ENRICHMENT_FIELDS = (
     "closed_set_split",
     "open_set_split",
@@ -71,6 +78,7 @@ _REPORT_ENRICHMENT_FIELDS = (
 )
 
 _Namespace = TypeVar("_Namespace")
+_validated_fiftyone_database_dir: Path | None = None
 
 
 class FinalDatasetError(RuntimeError):
@@ -83,6 +91,9 @@ class DatasetExistsError(FinalDatasetError):
 
 class OverwriteDeclinedError(FinalDatasetError):
     """Raised when the exact overwrite confirmation was not supplied."""
+
+
+AuditValidation = ValidationDiagnostics
 
 
 @dataclass(frozen=True)
@@ -106,6 +117,19 @@ class Audit:
     records: tuple[ValidatedRecord, ...]
     terminal_count: int
     lineage_candidate_count: int
+    terminal_identity_populated: int | None = None
+    terminal_identity_null: int | None = None
+    resolved_identity_populated: int | None = None
+    resolved_identity_null: int | None = None
+    validation: AuditValidation = AuditValidation()
+
+
+class AuditError(IntegrityError):
+    """Raised with the partial audit state accumulated before failure."""
+
+    def __init__(self, message: str, audit: Audit) -> None:
+        super().__init__(message)
+        self.audit = audit
 
 
 @dataclass(frozen=True)
@@ -144,11 +168,35 @@ class RunReport:
     ) -> "RunReport":
         started = started_at or datetime.now(timezone.utc)
         finished = finished_at or started
-        audit_status = "not_requested" if mode == "launch-only" else "passed"
         lineage_status = "not_requested" if mode == "launch-only" else "complete"
         status_counts = Counter(record.enrichment.status for record in audit.records)
         method_counts = Counter(record.enrichment.match_method for record in audit.records if record.enrichment.match_method is not None)
+        validation = audit.validation
         hashes = {record.integrity.sha256 for record in audit.records}
+        terminal_identity_populated = (
+            audit.terminal_identity_populated
+            if audit.terminal_identity_populated is not None
+            else sum(record.terminal.jaguar_id is not None for record in audit.records)
+        )
+        terminal_identity_null = (
+            audit.terminal_identity_null if audit.terminal_identity_null is not None else audit.terminal_count - terminal_identity_populated
+        )
+        resolved_identity_populated = (
+            audit.resolved_identity_populated
+            if audit.resolved_identity_populated is not None
+            else sum(record.resolved_jaguar_id is not None for record in audit.records)
+        )
+        resolved_identity_null = (
+            audit.resolved_identity_null if audit.resolved_identity_null is not None else audit.terminal_count - resolved_identity_populated
+        )
+        unique_sha256 = validation.unique_sha256 if validation.unique_sha256 is not None else len(hashes)
+        unique_paths = validation.unique_paths if validation.unique_paths is not None else len({record.terminal.filepath for record in audit.records})
+        if mode == "launch-only":
+            hash_status = "not_requested"
+            media_status = "not_requested"
+        else:
+            hash_status = "not_completed" if validation.media_failed else "failed" if validation.duplicate_hash_groups else "passed"
+            media_status = "failed" if validation.media_failed or validation.duplicate_path_groups else "passed"
         path_values = {} if paths is None else _report_paths(paths)
         return cls(
             started_at=_utc_text(started),
@@ -163,20 +211,31 @@ class RunReport:
                     "lineage_candidates": audit.lineage_candidate_count,
                     "validated": len(audit.records),
                     "constructed": None,
+                    "terminal_identity_populated": terminal_identity_populated,
+                    "terminal_identity_null": terminal_identity_null,
+                    "resolved_identity_populated": resolved_identity_populated,
+                    "resolved_identity_null": resolved_identity_null,
+                    "annotation_failed": validation.annotation_failed,
+                    "enrichment_failed": validation.enrichment_failed,
+                    "media_failed": validation.media_failed,
                 }
             ),
             hash_validation=MappingProxyType(
                 {
-                    "status": audit_status,
-                    "unique_sha256": len(hashes),
+                    "status": hash_status,
+                    "unique_sha256": unique_sha256,
                     "validated": len(audit.records),
+                    "duplicate_groups": validation.duplicate_hash_groups,
+                    "duplicate_pairs": validation.duplicate_hash_pairs,
                 }
             ),
             media_validation=MappingProxyType(
                 {
-                    "status": audit_status,
+                    "status": media_status,
                     "readable": len(audit.records),
-                    "unique_paths": len({record.terminal.filepath for record in audit.records}),
+                    "unique_paths": unique_paths,
+                    "duplicate_groups": validation.duplicate_path_groups,
+                    "duplicate_pairs": validation.duplicate_path_pairs,
                 }
             ),
             lineage=MappingProxyType(
@@ -259,7 +318,8 @@ class Services:
     audit: Callable[[RuntimePaths], Audit]
     dataset_exists: Callable[[str], bool]
     load_dataset: Callable[[str], Any]
-    create_snapshot: Callable[[Sequence[ValidatedRecord], str, str, bool], Any]
+    dataset_id: Callable[[Any], object]
+    create_snapshot: Callable[[Sequence[ValidatedRecord], str, str, bool, object | None], Any]
     verify_snapshot: Callable[[Any, Sequence[ValidatedRecord]], SnapshotSummary]
     launch: Callable[[Any, str, int], None]
     write_report: Callable[[RunReport, Path], Path]
@@ -324,12 +384,59 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
 
 
 def configure_fiftyone_environment(paths: RuntimePaths) -> None:
+    global _validated_fiftyone_database_dir
+    for unsafe_key in (
+        "FIFTYONE_DATABASE_URI",
+        "FIFTYONE_PRIVATE_DATABASE_PORT",
+    ):
+        if os.environ.get(unsafe_key):
+            raise StorageSafetyError(f"{unsafe_key} must be unset before configuring FiftyOne")
+
+    if paths.config_path.is_file():
+        try:
+            config_payload = json.loads(paths.config_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError) as error:
+            raise StorageSafetyError(f"could not inspect FiftyOne config file {paths.config_path}: {error}") from error
+        if not isinstance(config_payload, dict):
+            raise StorageSafetyError(f"FiftyOne config file must contain an object: {paths.config_path}")
+        if config_payload.get("database_uri"):
+            raise StorageSafetyError(f"FiftyOne config file database_uri must be unset: {paths.config_path}")
+        configured_database_dir = config_payload.get("database_dir")
+        if configured_database_dir is not None:
+            if not isinstance(configured_database_dir, str):
+                raise StorageSafetyError(f"FiftyOne config file database_dir must be a path string: {paths.config_path}")
+            configured_resolved = Path(configured_database_dir).expanduser().resolve(strict=False)
+            approved_resolved = paths.database_dir.resolve(strict=False)
+            if configured_resolved != approved_resolved:
+                raise StorageSafetyError(f"FiftyOne config file database_dir must resolve to {approved_resolved}, found {configured_resolved}")
+
     os.environ["FIFTYONE_CONFIG_PATH"] = str(paths.config_path)
     os.environ["FIFTYONE_DATABASE_DIR"] = str(paths.database_dir)
     os.environ["FIFTYONE_DATASET_ZOO_DIR"] = str(paths.dataset_dir)
     os.environ["FIFTYONE_DEFAULT_DATASET_DIR"] = str(paths.dataset_dir)
     os.environ["FIFTYONE_MODEL_ZOO_DIR"] = str(paths.model_zoo_dir)
     os.environ["FIFTYONE_PLUGINS_DIR"] = str(paths.plugins_dir)
+    _validated_fiftyone_database_dir = None
+
+
+def validate_imported_fiftyone_configuration(
+    fiftyone: Any,
+    approved_database_dir: Path,
+) -> None:
+    database_uri = getattr(fiftyone.config, "database_uri", None)
+    if database_uri is not None:
+        raise StorageSafetyError(f"FiftyOne database_uri must be unset, found {database_uri!r}")
+    private_port = os.environ.get("FIFTYONE_PRIVATE_DATABASE_PORT")
+    if private_port:
+        raise StorageSafetyError(f"FIFTYONE_PRIVATE_DATABASE_PORT must be unset, found {private_port!r}")
+
+    configured_database_dir = getattr(fiftyone.config, "database_dir", None)
+    if not isinstance(configured_database_dir, (str, os.PathLike)):
+        raise StorageSafetyError(f"FiftyOne database_dir is not configured as a filesystem path: {configured_database_dir!r}")
+    configured_resolved = Path(configured_database_dir).expanduser().resolve(strict=False)
+    approved_resolved = approved_database_dir.resolve(strict=False)
+    if configured_resolved != approved_resolved:
+        raise StorageSafetyError(f"FiftyOne database_dir must resolve to approved path {approved_resolved}, found {configured_resolved}")
 
 
 def _utc_text(value: datetime) -> str:
@@ -384,19 +491,54 @@ def build_validated_records(
     paths: RuntimePaths,
     *,
     expected_count: int = EXPECTED_SAMPLE_COUNT,
+    expected_terminal_identity_populated: int = EXPECTED_TERMINAL_IDENTITY_POPULATED,
+    expected_terminal_identity_null: int = EXPECTED_TERMINAL_IDENTITY_NULL,
 ) -> Audit:
     terminals = load_terminal_records(paths.terminal_export_dir)
-    candidates = load_lineage_candidates(paths.intermediate_dir)
-    index = LineageIndex.from_candidates(candidates)
-    records = validate_records(
-        [(terminal, index.enrich(terminal)) for terminal in terminals],
-        expected_count=expected_count,
+    candidates = load_lineage_candidates_from_paths(
+        paths.upstream_export_dirs,
+        paths.manifest_paths,
     )
-    return Audit(
+    populated_identity_count = sum(terminal.jaguar_id is not None for terminal in terminals)
+    null_identity_count = sum(terminal.jaguar_id is None for terminal in terminals)
+    identity_errors = []
+    if populated_identity_count != expected_terminal_identity_populated:
+        identity_errors.append(f"expected {expected_terminal_identity_populated} populated terminal identities, found {populated_identity_count}")
+    if null_identity_count != expected_terminal_identity_null:
+        identity_errors.append(f"expected {expected_terminal_identity_null} null terminal identities, found {null_identity_count}")
+    index = LineageIndex.from_candidates(candidates)
+    try:
+        records = validate_records(
+            [(terminal, index.enrich(terminal)) for terminal in terminals],
+            expected_count=expected_count,
+        )
+    except BatchValidationError as validation_error:
+        records = list(validation_error.records)
+        validation = validation_error.diagnostics
+        validation_errors = validation.errors
+    else:
+        validation_errors = ()
+        validation = AuditValidation(
+            unique_paths=len({record.terminal.filepath for record in records}),
+            unique_sha256=len({record.integrity.sha256 for record in records}),
+        )
+
+    resolved_identity_count = sum(record.resolved_jaguar_id is not None for record in records)
+    audit = Audit(
         records=tuple(records),
         terminal_count=len(terminals),
         lineage_candidate_count=len(candidates),
+        terminal_identity_populated=populated_identity_count,
+        terminal_identity_null=null_identity_count,
+        resolved_identity_populated=resolved_identity_count,
+        resolved_identity_null=len(terminals) - resolved_identity_count,
+        validation=validation,
     )
+    errors = list(identity_errors)
+    errors.extend(validation_errors)
+    if errors:
+        raise AuditError("; ".join(errors), audit)
+    return audit
 
 
 def _slug(value: str) -> str:
@@ -519,7 +661,19 @@ def validate_runtime_paths(
 
 
 def _fiftyone() -> Any:
-    return importlib.import_module("fiftyone")
+    global _validated_fiftyone_database_dir
+    fiftyone = importlib.import_module("fiftyone")
+    configured_database_dir = os.environ.get("FIFTYONE_DATABASE_DIR")
+    if not configured_database_dir:
+        raise StorageSafetyError("FIFTYONE_DATABASE_DIR must be configured before importing FiftyOne")
+    approved_database_dir = Path(configured_database_dir).resolve(strict=False)
+    if _validated_fiftyone_database_dir != approved_database_dir:
+        validate_imported_fiftyone_configuration(
+            fiftyone,
+            approved_database_dir,
+        )
+        _validated_fiftyone_database_dir = approved_database_dir
+    return fiftyone
 
 
 def _dataset_exists(dataset_name: str) -> bool:
@@ -530,11 +684,16 @@ def _load_dataset(dataset_name: str) -> Any:
     return _fiftyone().load_dataset(dataset_name)
 
 
+def _dataset_id(dataset: Any) -> object:
+    return dataset._doc.id
+
+
 def _create_snapshot(
     records: Sequence[ValidatedRecord],
     dataset_name: str,
     temporary_name: str,
     replace_existing: bool,
+    expected_original_id: object | None,
 ) -> Any:
     snapshot = importlib.import_module("jaguars.visualization.final_snapshot")
     return snapshot.create_snapshot(
@@ -542,6 +701,7 @@ def _create_snapshot(
         dataset_name,
         temporary_name,
         replace_existing=replace_existing,
+        expected_original_id=expected_original_id,
     )
 
 
@@ -568,6 +728,7 @@ DEFAULT_SERVICES = Services(
     audit=build_validated_records,
     dataset_exists=_dataset_exists,
     load_dataset=_load_dataset,
+    dataset_id=_dataset_id,
     create_snapshot=_create_snapshot,
     verify_snapshot=_verify_snapshot,
     launch=launch_and_wait,
@@ -651,10 +812,12 @@ def run(
             return 0
 
         exists = active_services.dataset_exists(args.dataset_name)
+        expected_original_id: object | None = None
         if exists and not args.overwrite:
             raise DatasetExistsError(f"dataset already exists: {args.dataset_name}")
         if exists:
             existing_dataset = active_services.load_dataset(args.dataset_name)
+            expected_original_id = active_services.dataset_id(existing_dataset)
             existing_count = len(existing_dataset)
             if args.yes:
                 active_services.output_fn(f"Existing dataset samples: {existing_count}")
@@ -676,14 +839,25 @@ def run(
             args.dataset_name,
             f"{args.dataset_name}__building",
             exists and args.overwrite,
+            expected_original_id,
         )
         summary = active_services.verify_snapshot(dataset, audit.records)
-        completed = report.completed(summary, finished_at=active_services.now())
-        active_services.write_report(completed, runtime_paths.report_dir)
+        report = report.completed(summary, finished_at=active_services.now())
+        active_services.write_report(report, runtime_paths.report_dir)
         if not args.create_only:
             active_services.launch(dataset, args.address, args.port)
         return 0
     except Exception as error:
+        if isinstance(error, AuditError):
+            audit = error.audit
+            report = RunReport.from_audit(
+                audit,
+                paths=runtime_paths,
+                dataset_name=args.dataset_name,
+                mode=_mode(args),
+                started_at=started_at,
+                finished_at=active_services.now(),
+            )
         failure_report = report or RunReport.from_audit(
             audit,
             paths=runtime_paths,

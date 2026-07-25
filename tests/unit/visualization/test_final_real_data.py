@@ -9,6 +9,7 @@ import pytest
 
 from jaguars.visualization import final_dataset
 from jaguars.visualization.final_dataset import (
+    AuditError,
     EXPECTED_SAMPLE_COUNT,
     build_validated_records,
     default_runtime_paths,
@@ -53,12 +54,25 @@ def test_real_terminal_pipeline_preserves_all_records_through_expected_count_val
         default_runtime_paths(),
         intermediate_dir=REAL_INTERMEDIATE_DIR,
         terminal_export_dir=REAL_TERMINAL_EXPORT_DIR,
+        upstream_export_dirs=(
+            REAL_INTERMEDIATE_DIR / "fo_jaguars/exports/segmented_deduplicated",
+            REAL_INTERMEDIATE_DIR / "fo_jaguars/exports/segmented",
+            REAL_INTERMEDIATE_DIR / "fo_jaguars/exports/deduplicated",
+            REAL_INTERMEDIATE_DIR / "fo_jaguars/ingested",
+        ),
+        manifest_paths=(
+            REAL_INTERMEDIATE_DIR / "labels_with_splits.csv",
+            REAL_INTERMEDIATE_DIR / "pptx_extracted_labels_with_splits.csv",
+        ),
     )
     captured: dict[str, Any] = {}
-    real_lineage_loader = final_dataset.load_lineage_candidates
+    real_lineage_loader = final_dataset.load_lineage_candidates_from_paths
 
-    def capture_candidates(intermediate_dir: Path) -> tuple[LineageCandidate, ...]:
-        candidates = real_lineage_loader(intermediate_dir)
+    def capture_candidates(
+        export_dirs: tuple[Path, ...],
+        manifest_paths: tuple[Path, ...],
+    ) -> tuple[LineageCandidate, ...]:
+        candidates = real_lineage_loader(export_dirs, manifest_paths)
         captured["candidates"] = candidates
         return candidates
 
@@ -73,7 +87,11 @@ def test_real_terminal_pipeline_preserves_all_records_through_expected_count_val
         captured["expected_count"] = expected_count
         return []
 
-    monkeypatch.setattr(final_dataset, "load_lineage_candidates", capture_candidates)
+    monkeypatch.setattr(
+        final_dataset,
+        "load_lineage_candidates_from_paths",
+        capture_candidates,
+    )
     monkeypatch.setattr(final_dataset, "validate_records", count_only_validation)
 
     audit = build_validated_records(paths)
@@ -100,3 +118,37 @@ def test_real_terminal_pipeline_preserves_all_records_through_expected_count_val
     }
     assert sum(identity is not None for identity in resolved_identities) == 1120
     assert sum(identity is None for identity in resolved_identities) == 247
+
+
+def test_real_audit_reports_known_strict_bbox_and_duplicate_hash_failures() -> None:
+    paths = replace(
+        default_runtime_paths(),
+        intermediate_dir=REAL_INTERMEDIATE_DIR,
+        terminal_export_dir=REAL_TERMINAL_EXPORT_DIR,
+        upstream_export_dirs=(
+            REAL_INTERMEDIATE_DIR / "fo_jaguars/exports/segmented_deduplicated",
+            REAL_INTERMEDIATE_DIR / "fo_jaguars/exports/segmented",
+            REAL_INTERMEDIATE_DIR / "fo_jaguars/exports/deduplicated",
+            REAL_INTERMEDIATE_DIR / "fo_jaguars/ingested",
+        ),
+        manifest_paths=(
+            REAL_INTERMEDIATE_DIR / "labels_with_splits.csv",
+            REAL_INTERMEDIATE_DIR / "pptx_extracted_labels_with_splits.csv",
+        ),
+    )
+
+    with pytest.raises(AuditError) as caught:
+        build_validated_records(paths)
+
+    audit = caught.value.audit
+    assert audit.terminal_count == 1367
+    assert audit.terminal_identity_populated == 1120
+    assert audit.terminal_identity_null == 247
+    assert audit.validation.annotation_failed == 15
+    assert audit.validation.enrichment_failed == 0
+    assert audit.validation.media_failed == 0
+    assert audit.validation.duplicate_path_groups == 0
+    assert audit.validation.unique_paths == 1367
+    assert audit.validation.duplicate_hash_groups == 39
+    assert audit.validation.duplicate_hash_pairs == 39
+    assert audit.validation.unique_sha256 == 1328

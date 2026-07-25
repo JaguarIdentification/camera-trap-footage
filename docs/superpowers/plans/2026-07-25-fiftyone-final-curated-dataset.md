@@ -406,6 +406,8 @@ def run(args: argparse.Namespace, services: Services = DEFAULT_SERVICES) -> int:
 
 On overwrite, audit first, show existing/proposed counts, and require the exact dataset name interactively unless `--yes`. Pass the confirmed replacement request to the snapshot adapter, which builds and validates unique staging while the old final remains published, then performs a rollback-safe old-to-backup/staging-to-final swap. It deletes only the owned old backup after successful promotion and never deletes media. `--launch-only` validates mounts and loads the existing snapshot without auditing media. Install SIGINT-safe App session cleanup.
 
+Hardening addendum: reject inherited URI/private-port database configuration and validate the imported FiftyOne configuration against the exact approved directory. Pin the original final dataset ID at confirmation and require that ID at promotion. Model promotion-attempted recovery separately, including transient verification queries and delete failures before or after their database effect. Classify constructor failures from persisted state instead of exception text. Keep terminal identity counts (1,120 populated, 247 null) separate from resolved counts, validate masks/splits/scalars without importing FiftyOne, emit phase-aware partial reports, and consume the exact configured upstream export and manifest paths. The read-only mounted-data probe is expected to report 15 annotation-invalid samples, 39 duplicate-hash pairs, and 1,328 unique hashes, so production creation remains blocked.
+
 - [ ] **Step 4: Run CLI tests and verify GREEN**
 
 Run:
