@@ -399,6 +399,49 @@ def test_constructor_failure_after_metadata_insert_removes_temporary_dataset(
     assert not fo.dataset_exists(temporary_name)
 
 
+def test_racing_temporary_base_claimant_survives_owned_constructor_failure(
+    tmp_path: Path,
+    dataset_names: tuple[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    final_name, temporary_name = dataset_names
+    owned_build_name = f"{temporary_name}--build-deterministic-owner-token"
+    original_refuse_collisions = final_snapshot._refuse_collisions
+    original_create_indexes = fod._create_indexes
+    index_calls = 0
+
+    def claim_base_after_preflight(dataset_name: str, temporary_base: str) -> None:
+        original_refuse_collisions(dataset_name, temporary_base)
+        claimant = fo.Dataset(temporary_base, persistent=True)
+        claimant.info["owner"] = "racing-caller"
+        claimant.save()
+
+    def fail_owned_index_creation(sample_collection_name: str, frame_collection_name: str | None) -> None:
+        nonlocal index_calls
+        index_calls += 1
+        if index_calls == 1:
+            original_create_indexes(sample_collection_name, frame_collection_name)
+            return
+        raise RuntimeError("forced owned build index failure")
+
+    monkeypatch.setattr(final_snapshot, "_refuse_collisions", claim_base_after_preflight)
+    monkeypatch.setattr(
+        final_snapshot,
+        "_build_dataset_name",
+        lambda temporary_base: owned_build_name,
+        raising=False,
+    )
+    monkeypatch.setattr(fod, "_create_indexes", fail_owned_index_creation)
+
+    with pytest.raises(RuntimeError, match="forced owned build index failure"):
+        create_snapshot([_validated_record(tmp_path)], final_name, temporary_name)
+
+    claimant = fo.load_dataset(temporary_name)
+    assert claimant.info["owner"] == "racing-caller"
+    assert not fo.dataset_exists(owned_build_name)
+    assert not fo.dataset_exists(final_name)
+
+
 def test_snapshot_inserts_in_bounded_batches(
     tmp_path: Path,
     dataset_names: tuple[str, str],

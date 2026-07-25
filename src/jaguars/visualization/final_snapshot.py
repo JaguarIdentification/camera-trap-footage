@@ -1,4 +1,5 @@
 from collections.abc import Sequence
+from uuid import uuid4
 
 import fiftyone as fo
 import fiftyone.core.fields as fof
@@ -322,18 +323,22 @@ def _refuse_collisions(dataset_name: str, temporary_name: str) -> None:
         raise SnapshotCollisionError(f"temporary dataset already exists: {temporary_name}")
 
 
+def _build_dataset_name(temporary_name: str) -> str:
+    return f"{temporary_name}--build-{uuid4().hex}"
+
+
 def create_snapshot(
     records: Sequence[ValidatedRecord],
     dataset_name: str,
     temporary_name: str,
 ) -> fo.Dataset:
     """Atomically publish a persistent, validated FiftyOne snapshot."""
-    temporary_name_was_absent = False
+    owned_build_name: str | None = None
     dataset: fo.Dataset | None = None
     try:
         _refuse_collisions(dataset_name, temporary_name)
-        temporary_name_was_absent = True
-        dataset = fo.Dataset(temporary_name, persistent=True)
+        owned_build_name = _build_dataset_name(temporary_name)
+        dataset = fo.Dataset(owned_build_name, persistent=True)
         _declare_schema(dataset)
         _insert_bounded(dataset, records)
         _save_views(dataset)
@@ -343,6 +348,6 @@ def create_snapshot(
     except Exception:
         if dataset is not None and not dataset.deleted:
             dataset.delete()
-        elif temporary_name_was_absent and fo.dataset_exists(temporary_name):
-            fo.delete_dataset(temporary_name)
+        elif owned_build_name is not None and fo.dataset_exists(owned_build_name):
+            fo.delete_dataset(owned_build_name)
         raise
