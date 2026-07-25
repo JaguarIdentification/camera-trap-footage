@@ -429,7 +429,7 @@ def load_export_candidates(export_dir: Path) -> tuple[LineageCandidate, ...]:
         sample = {_normalize_header(str(key)): value for key, value in raw_sample.items()}
         raw_filepath = sample.get("FILEPATH")
         filepath = _normalize_path(raw_filepath) if isinstance(raw_filepath, str) and raw_filepath.strip() else None
-        if filepath is not None and posixpath.isabs(filepath):
+        if filepath is not None and _is_absolute_path(filepath):
             export_root = _normalize_path(export_dir.resolve().as_posix())
             prefix = f"{export_root}/"
             export_relative_filepath = filepath[len(prefix) :] if filepath.startswith(prefix) else None
@@ -442,7 +442,7 @@ def load_export_candidates(export_dir: Path) -> tuple[LineageCandidate, ...]:
             dataset_path=_json_string(sample, "dataset_path"),
             raw_data_path=_json_string(sample, "raw_data_path"),
         )
-        if source_media_path is None and filepath is not None and posixpath.isabs(filepath):
+        if source_media_path is None and filepath is not None and _is_absolute_path(filepath):
             source_media_path = filepath
         normalized_source_filepath = source_media_path
         original_filename = _json_string(sample, "original_filename")

@@ -442,6 +442,32 @@ def test_absolute_export_filepath_is_also_a_normalized_source_path(
     assert candidate.normalized_source_filepath == (tmp_path / "raw/a.jpg").as_posix()
 
 
+def test_windows_absolute_export_filepath_is_a_source_not_export_relative(
+    tmp_path: Path,
+) -> None:
+    export_dir = tmp_path / "deduplicated"
+    export_dir.mkdir()
+    (export_dir / "samples.json").write_text(
+        json.dumps(
+            {
+                "samples": [
+                    {
+                        "_id": {"$oid": "windows-sample"},
+                        "filepath": r"C:\camera\folder\..\a.jpg",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    candidate = load_export_candidates(export_dir)[0]
+
+    assert candidate.normalized_source_filepath == "C:/camera/a.jpg"
+    assert candidate.source_media_path == "C:/camera/a.jpg"
+    assert candidate.export_relative_filepath is None
+
+
 def test_load_lineage_candidates_reads_all_four_exports_and_both_manifests(
     tmp_path: Path,
 ) -> None:
@@ -547,6 +573,31 @@ def test_incompatible_manifest_is_not_merged_into_an_exact_export_match(
     enrichment = index.enrich(_terminal(tmp_path, "data/a.jpg"))
 
     assert enrichment.status == "matched"
+    assert enrichment.fields["site"] == "Site 1"
+    assert "closed_set_split" not in enrichment.fields
+
+
+def test_duplicate_value_equal_manifest_rows_are_not_merged_into_unique_export(
+    tmp_path: Path,
+) -> None:
+    manifest = tmp_path / "labels_with_splits.csv"
+    manifest.write_text(
+        "JAGUAR ID,ORIGINAL FILE NAME,CLOSED SET SPLIT\n" "F11,ORIGINAL.JPG,train\n" "F11,ORIGINAL.JPG,train\n",
+        encoding="utf-8",
+    )
+    export = LineageCandidate(
+        candidate_type="export",
+        export_relative_filepath="data/a.jpg",
+        jaguar_id="F11",
+        original_filename="ORIGINAL.JPG",
+        site="Site 1",
+    )
+    index = LineageIndex.from_candidates([export, *load_manifest_candidates(manifest)])
+
+    enrichment = index.enrich(_terminal(tmp_path, "data/a.jpg"))
+
+    assert enrichment.status == "matched"
+    assert enrichment.match_method == "export_relative_filepath"
     assert enrichment.fields["site"] == "Site 1"
     assert "closed_set_split" not in enrichment.fields
 
