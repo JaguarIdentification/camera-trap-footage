@@ -44,17 +44,30 @@ valid nonempty body boxes and segmentations.
 
 ## Curation storage and atomicity
 
-The curated export hardlinks retained media to the original export. It never
-copies or re-encodes media and never modifies the original export. A
-cross-filesystem or otherwise unsupported hardlink fails safely.
+The curated export is metadata-only because the source volume is exFAT and
+does not support hardlinks. Each curated `samples.json` filepath is the
+canonical absolute path of retained media below the original terminal
+export's `data` directory. Creation never copies, symlinks, hardlinks, or
+re-encodes media and never modifies the original export. The target contains
+only `samples.json`, `metadata.json`, and `curation_report.json`.
+
+The terminal parser remains export-local by default. The curated snapshot
+workflow explicitly supplies the original `data` directory as its approved
+media root, requires every resolved path to be a strict descendant, and
+rejects traversal or symlink escapes. The snapshot CLI is the authoritative
+loader; generic FiftyOne-dataset importers that require a target-local `data`
+directory are not supported by copying media into place.
 
 Dry-run planning performs no writes. Creation builds a sibling temporary
 directory, writes deterministic `samples.json`, minimal `metadata.json`, and
 `curation_report.json`, validates the complete result, and only then renames
 it to the target. An existing target is refused unless `--create --overwrite`
 is explicitly supplied and confirmed; noninteractive overwrite additionally
-requires `--yes`. Replacement keeps the old target recoverable until the new
-directory is ready.
+requires `--yes`, and piped text is never accepted as confirmation. A lexical
+target that is itself a symlink or has an unsafe ancestor/descendant
+relationship with the source is rejected before staging or removal.
+Replacement keeps the old target recoverable until the new directory is
+ready.
 
 The sidecar records the source `samples.json` SHA-256, policy version, counts,
 kept and dropped paths, reasons, exact-hash groups, representatives, audited
@@ -99,7 +112,8 @@ ambiguous lineage is reported but does not remove a retained sample.
 
 ## FiftyOne storage and immutability
 
-FiftyOne references curated hardlinks in place. Generated state stays on
+FiftyOne references the canonical original terminal media paths in place.
+Generated state stays on
 external storage:
 
 - Database: `/Volumes/CameraTrapPython/fiftyone/var/lib/mongo`
@@ -162,8 +176,9 @@ samples must omit both annotation fields.
 ## Testing and acceptance
 
 Unit tests cover representative selection and conflicts, semantic annotation
-normalization, exact counts, clips, exclusions, sidecars, hardlink evidence,
-unsupported hardlinks, atomic failure cleanup, guarded overwrite, parser and
+normalization, exact counts, clips, exclusions, metadata-only sidecars,
+approved-root media references and escapes, source immutability, atomic
+failure cleanup, symlink-safe guarded overwrite, TTY confirmation, parser and
 validator compatibility, CLI defaults, and review contracts.
 
 An isolated FiftyOne integration suite verifies schema, media-only review

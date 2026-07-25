@@ -74,7 +74,10 @@ def test_real_curation_dry_run_accepts_approved_1322_sample_target() -> None:
     reason="curated export has not been materialized yet",
 )
 def test_real_curated_export_is_parser_and_validator_green() -> None:
-    terminals = load_terminal_records(REAL_CURATED_EXPORT_DIR)
+    terminals = load_terminal_records(
+        REAL_CURATED_EXPORT_DIR,
+        allowed_media_root=REAL_SOURCE_EXPORT_DIR / "data",
+    )
     candidates = load_lineage_candidates_from_paths(
         REAL_UPSTREAM_EXPORT_DIRS,
         REAL_MANIFEST_PATHS,

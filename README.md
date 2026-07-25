@@ -97,8 +97,12 @@ After review, materialize the export atomically:
 uv run python -m jaguars.visualization.final_curation --create
 ```
 
-Media is hardlinked to the untouched source export; it is never copied or
-re-encoded. Unsupported cross-filesystem hardlinks fail. Four retained records
+The curated export is metadata-only: its `samples.json` points to canonical
+media paths below the untouched original export's `data` directory. No media
+is copied, linked, symlinked, or re-encoded, which keeps creation compatible
+with the exFAT data volume. The snapshot CLI is the authoritative loader for
+this reference export; a standalone FiftyOne-dataset import may expect a local
+`data` directory that is deliberately absent. Four retained records
 (`000001-143`, `000002-144`, `000010-18`, and `000005-126`) are deliberately
 not re-segmented: their malformed annotations are omitted and they are marked
 `review_required=True`, `review_status="pending"`, and

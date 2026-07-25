@@ -100,28 +100,38 @@ def annotation_to_dict(annotation: FrozenAnnotation) -> dict[str, Any]:
     return {key: _thaw_json(value) for key, value in annotation.items()}
 
 
-def _media_path(export_dir: Path, raw_filepath: object) -> tuple[Path, str]:
+def _media_path(
+    export_dir: Path,
+    raw_filepath: object,
+    allowed_media_root: Path | None,
+) -> tuple[Path, str]:
     if not isinstance(raw_filepath, str) or not raw_filepath.strip():
         raise TerminalExportError("filepath must be a nonempty string")
 
     try:
         export_root = export_dir.resolve()
+        approved_root = export_root if allowed_media_root is None else allowed_media_root.expanduser().resolve()
         supplied_path = Path(raw_filepath)
         candidate = supplied_path if supplied_path.is_absolute() else export_root / supplied_path
         resolved_path = candidate.resolve()
-    except (OSError, ValueError) as exc:
+    except (OSError, RuntimeError, ValueError) as exc:
         raise TerminalExportError(f"invalid filepath {raw_filepath!r}: {exc}") from exc
 
-    if resolved_path == export_root or not resolved_path.is_relative_to(export_root):
-        raise TerminalExportError(f"filepath must resolve below export directory: {raw_filepath}")
+    if resolved_path == approved_root or not resolved_path.is_relative_to(approved_root):
+        boundary = "export directory" if allowed_media_root is None else "approved media root"
+        raise TerminalExportError(f"filepath must resolve below {boundary}: {raw_filepath}")
 
-    relative_filepath = resolved_path.relative_to(export_root).as_posix()
+    if allowed_media_root is None:
+        relative_filepath = resolved_path.relative_to(export_root).as_posix()
+    else:
+        relative_filepath = (Path(approved_root.name) / resolved_path.relative_to(approved_root)).as_posix()
     return resolved_path, relative_filepath
 
 
 def _parse_terminal_sample(
     export_dir: Path,
     sample: object,
+    allowed_media_root: Path | None,
 ) -> TerminalRecord:
     if not isinstance(sample, dict):
         raise TerminalExportError("each samples.json entry must be an object")
@@ -159,7 +169,11 @@ def _parse_terminal_sample(
         review_status = "pending"
         tags = ("needs_annotation_review",)
 
-    filepath, relative_filepath = _media_path(export_dir, sample.get("filepath"))
+    filepath, relative_filepath = _media_path(
+        export_dir,
+        sample.get("filepath"),
+        allowed_media_root,
+    )
     return TerminalRecord(
         source_id=_source_id(sample),
         filepath=filepath,
@@ -174,7 +188,11 @@ def _parse_terminal_sample(
     )
 
 
-def load_terminal_records(export_dir: Path) -> list[TerminalRecord]:
+def load_terminal_records(
+    export_dir: Path,
+    *,
+    allowed_media_root: Path | None = None,
+) -> list[TerminalRecord]:
     """Load terminal samples from a FiftyOne JSON export."""
     samples_path = export_dir / "samples.json"
     try:
@@ -185,5 +203,12 @@ def load_terminal_records(export_dir: Path) -> list[TerminalRecord]:
     if not isinstance(payload, dict) or not isinstance(payload.get("samples"), list):
         raise TerminalExportError("samples.json must contain a samples list")
 
-    records = [_parse_terminal_sample(export_dir, sample) for sample in payload["samples"]]
+    records = [
+        _parse_terminal_sample(
+            export_dir,
+            sample,
+            allowed_media_root,
+        )
+        for sample in payload["samples"]
+    ]
     return sorted(records, key=lambda record: record.relative_filepath)

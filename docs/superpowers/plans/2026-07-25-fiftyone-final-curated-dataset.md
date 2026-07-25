@@ -4,14 +4,15 @@
 > original terminal export and production FiftyOne database are read-only.
 
 **Goal:** Deterministically curate the defective 1,367-record terminal export
-into a 1,322-record hardlinked export, then use that export as the only default
+into a 1,322-record metadata-only reference export, then use that export as the only default
 source for the frozen `JaguarCameraTrap_Final_Curated_v1` snapshot.
 
 **Architecture:** A pure curation planner hashes and groups source records,
 applies the approved representative/exclusion/clip/review policy, and returns a
 validated immutable plan. A filesystem adapter materializes that plan
-atomically with hardlinks and a complete sidecar. Existing parser, validator,
-snapshot, and CLI modules consume the curated export and enforce the
+atomically as three JSON files whose canonical media references remain below
+the original approved `data` root. Existing parser, validator, snapshot, and
+CLI modules consume the curated export and enforce the
 media-only review exception.
 
 ## Approved acceptance target
@@ -55,18 +56,20 @@ removed and explicit pending-review fields/tag.
    uv run pytest tests/unit/visualization/test_final_curation.py -v
    ```
 
-## Task 2: Atomic hardlink export construction
+## Task 2: Atomic metadata-only reference export construction
 
-1. Write failing tests for hardlink inode equality, source immutability,
-   deterministic rewritten samples, clips, stripped review annotations,
-   sidecar completeness, unsupported hardlinks, partial-build cleanup, and
-   guarded overwrite.
-2. Materialize a sibling staging directory using `os.link` only.
-3. Write deterministic sample IDs, paths internal to the target, minimal
-   metadata, and `curation_report.json`.
+1. Write failing tests for canonical approved-root references, absence of
+   target media files, source immutability, deterministic rewritten samples,
+   clips, stripped review annotations, sidecar completeness, partial-build
+   cleanup, and guarded overwrite.
+2. Materialize only `samples.json`, `metadata.json`, and
+   `curation_report.json` in a sibling staging directory.
+3. Write deterministic sample IDs and canonical original-media paths. Do not
+   copy, hardlink, symlink, or re-encode media; the source volume is exFAT.
 4. Refuse an existing target unless `--create --overwrite` is confirmed;
    require `--yes` for noninteractive replacement.
-5. Rename only after the complete staging export is written and validated.
+5. Rename only after the complete staging export is written and validated,
+   including strict approved-root path and pinned media-hash checks.
 6. Load the synthetic result through the terminal parser and batch validator.
 
 ## Task 3: Pending-review parser and validator contract
@@ -86,6 +89,9 @@ removed and explicit pending-review fields/tag.
 4. Reject partial annotation pairs, incomplete review metadata, or missing
    ordinary annotations.
 5. Validate media and hashes normally for review samples.
+6. Keep export-local media confinement as the parser default. Permit canonical
+   external references only when the caller supplies an explicit approved
+   media root, and reject the root itself, traversal, and symlink escapes.
 
 ## Task 4: Snapshot schema and saved review view
 
@@ -131,6 +137,11 @@ removed and explicit pending-review fields/tag.
    default source.
 4. Print the complete report on dry-run without writing.
 5. Never open FiftyOne or touch its database.
+6. Preserve the lexical target through safety checks, reject a target that is
+   itself a symlink or has an unsafe source relationship, and never remove a
+   symlink referent.
+7. Prompt for overwrite only on a TTY; noninteractive overwrite requires
+   `--yes` even if piped input contains the exact path.
 
 ## Task 7: Documentation and verification
 

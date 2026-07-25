@@ -1,6 +1,4 @@
-import errno
 import json
-import shutil
 from dataclasses import replace
 from pathlib import Path
 from types import MappingProxyType
@@ -371,11 +369,12 @@ def test_plan_rejects_configured_policy_actions_lost_during_deduplication(
         )
 
 
-def test_materialization_hardlinks_media_rewrites_samples_and_records_sidecar(
+def test_materialization_references_original_media_and_writes_metadata_only(
     tmp_path: Path,
 ) -> None:
     source = _write_source_export(tmp_path)
     source_samples_before = (source / "samples.json").read_bytes()
+    source_media_before = {path.name: path.read_bytes() for path in (source / "data").iterdir()}
     target = tmp_path / "target"
     plan = build_curation_plan(source, target, policy=_fixture_policy())
 
@@ -383,16 +382,22 @@ def test_materialization_hardlinks_media_rewrites_samples_and_records_sidecar(
 
     assert result == target.resolve()
     assert (source / "samples.json").read_bytes() == source_samples_before
-    for relative_path in plan.kept_paths:
-        assert (source / relative_path).stat().st_ino == (target / relative_path).stat().st_ino
+    assert {path.name: path.read_bytes() for path in (source / "data").iterdir()} == source_media_before
+    assert {path.name for path in target.iterdir()} == {
+        "curation_report.json",
+        "metadata.json",
+        "samples.json",
+    }
+    assert not (target / "data").exists()
 
     payload = json.loads((target / "samples.json").read_text(encoding="utf-8"))
-    samples = {sample["filepath"]: sample for sample in payload["samples"]}
-    assert tuple(sorted(samples)) == plan.kept_paths
+    samples = {Path(sample["filepath"]).name: sample for sample in payload["samples"]}
+    assert {Path(sample["filepath"]) for sample in samples.values()} == {sample.terminal.filepath for sample in plan.selected}
+    assert all(Path(sample["filepath"]).is_relative_to((source / "data").resolve()) for sample in samples.values())
     assert all("_dataset_id" not in sample and "_rand" not in sample for sample in samples.values())
     assert all(len(sample["_id"]["$oid"]) == 24 for sample in samples.values())
 
-    review = samples["data/review.png"]
+    review = samples["review.png"]
     assert "bboxes_body" not in review
     assert "segmentations_body" not in review
     assert review["review_required"] is True
@@ -400,7 +405,7 @@ def test_materialization_hardlinks_media_rewrites_samples_and_records_sidecar(
     assert review["review_status"] == "pending"
     assert review["tags"] == ["needs_annotation_review"]
 
-    clipped = samples["data/clip.png"]
+    clipped = samples["clip.png"]
     assert clipped["bboxes_body"]["detections"][0]["bounding_box"] == [
         0.1,
         0.0,
@@ -412,6 +417,8 @@ def test_materialization_hardlinks_media_rewrites_samples_and_records_sidecar(
 
     report = json.loads((target / "curation_report.json").read_text(encoding="utf-8"))
     assert report["policy_version"] == "test-v1"
+    assert report["media_storage"] == "canonical_source_references"
+    assert report["allowed_media_root"] == str((source / "data").resolve())
     assert report["source_samples_sha256"] == plan.source_samples_sha256
     assert report["counts"] == {
         "source": 5,
@@ -433,7 +440,10 @@ def test_materialization_hardlinks_media_rewrites_samples_and_records_sidecar(
         }
     ]
 
-    parsed = load_terminal_records(target)
+    parsed = load_terminal_records(
+        target,
+        allowed_media_root=source / "data",
+    )
     validated = validate_records(
         [
             (
@@ -450,20 +460,6 @@ def test_materialization_hardlinks_media_rewrites_samples_and_records_sidecar(
     )
     assert len(validated) == 3
     assert sum(record.terminal.review_required for record in validated) == 1
-
-
-def test_materialization_rejects_a_link_adapter_that_copies_media(
-    tmp_path: Path,
-) -> None:
-    source = _write_source_export(tmp_path)
-    target = tmp_path / "target"
-    plan = build_curation_plan(source, target, policy=_fixture_policy())
-
-    with pytest.raises(CurationError, match="hardlink"):
-        materialize_curated_export(plan, link_fn=shutil.copyfile)
-
-    assert not target.exists()
-    assert not list(tmp_path.glob(".target.building-*"))
 
 
 def test_materialization_validates_staging_before_promotion(
@@ -510,24 +506,6 @@ def test_materialization_rejects_media_drift_after_planning(
 
     assert not target.exists()
     assert not list(tmp_path.glob(".target.building-*"))
-
-
-def test_materialization_fails_without_partial_target_when_hardlinks_unsupported(
-    tmp_path: Path,
-) -> None:
-    source = _write_source_export(tmp_path)
-    target = tmp_path / "target"
-    plan = build_curation_plan(source, target, policy=_fixture_policy())
-
-    def unsupported(_source: Path, _target: Path) -> None:
-        raise OSError(errno.EXDEV, "cross-device link")
-
-    with pytest.raises(CurationError, match="hardlink"):
-        materialize_curated_export(plan, link_fn=unsupported)
-
-    assert not target.exists()
-    assert not list(tmp_path.glob(".target.building-*"))
-    assert len(list((source / "data").iterdir())) == 5
 
 
 def test_materialization_requires_explicit_confirmed_overwrite_and_replaces_atomically(
@@ -603,6 +581,48 @@ def test_materialization_rejects_a_target_that_contains_the_source(
     assert (source / "samples.json").is_file()
 
 
+def test_materialization_rejects_lexical_source_descendant_through_symlink(
+    tmp_path: Path,
+) -> None:
+    source = _write_source_export(tmp_path)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    redirect = source / "redirect"
+    redirect.symlink_to(outside, target_is_directory=True)
+    target = redirect / "target"
+    plan = build_curation_plan(source, target, policy=_fixture_policy())
+
+    with pytest.raises(CurationError, match="inside the source export"):
+        materialize_curated_export(plan)
+
+    assert redirect.is_symlink()
+    assert not target.exists()
+
+
+def test_materialization_rejects_symlink_target_without_touching_referent(
+    tmp_path: Path,
+) -> None:
+    source = _write_source_export(tmp_path)
+    referent = tmp_path / "referent"
+    referent.mkdir()
+    sentinel = referent / "existing.txt"
+    sentinel.write_text("must survive", encoding="utf-8")
+    target = tmp_path / "target"
+    target.symlink_to(referent, target_is_directory=True)
+    plan = build_curation_plan(source, target, policy=_fixture_policy())
+
+    with pytest.raises(CurationError, match="symbolic link"):
+        materialize_curated_export(
+            plan,
+            overwrite=True,
+            confirmed=True,
+        )
+
+    assert target.is_symlink()
+    assert target.resolve() == referent.resolve()
+    assert sentinel.read_text(encoding="utf-8") == "must survive"
+
+
 def test_curation_cli_defaults_to_read_only_audit_of_approved_paths() -> None:
     args = parse_args([])
 
@@ -673,6 +693,7 @@ def test_curation_cli_create_requires_exact_interactive_overwrite_confirmation(
             args,
             policy=_fixture_policy(),
             input_fn=lambda _prompt: "wrong target",
+            isatty_fn=lambda: True,
             output_fn=lambda _message: None,
         )
     assert (target / "existing.txt").read_text(encoding="utf-8") == "unchanged"
@@ -681,8 +702,71 @@ def test_curation_cli_create_requires_exact_interactive_overwrite_confirmation(
         args,
         policy=_fixture_policy(),
         input_fn=lambda _prompt: str(target.resolve()),
+        isatty_fn=lambda: True,
         output_fn=lambda _message: None,
     )
 
     assert exit_code == 0
+    assert (target / "curation_report.json").is_file()
+
+
+def test_curation_cli_noninteractive_overwrite_requires_yes_even_with_exact_input(
+    tmp_path: Path,
+) -> None:
+    source = _write_source_export(tmp_path)
+    target = tmp_path / "target"
+    target.mkdir()
+    sentinel = target / "existing.txt"
+    sentinel.write_text("unchanged", encoding="utf-8")
+    input_called = False
+
+    def exact_input(_prompt: str) -> str:
+        nonlocal input_called
+        input_called = True
+        return str(target.resolve())
+
+    args = parse_args(
+        [
+            "--create",
+            "--overwrite",
+            "--source",
+            str(source),
+            "--target",
+            str(target),
+        ]
+    )
+
+    with pytest.raises(CurationError, match="--yes"):
+        run(
+            args,
+            policy=_fixture_policy(),
+            input_fn=exact_input,
+            isatty_fn=lambda: False,
+            output_fn=lambda _message: None,
+        )
+
+    assert input_called is False
+    assert sentinel.read_text(encoding="utf-8") == "unchanged"
+
+    yes_args = parse_args(
+        [
+            "--create",
+            "--overwrite",
+            "--yes",
+            "--source",
+            str(source),
+            "--target",
+            str(target),
+        ]
+    )
+    exit_code = run(
+        yes_args,
+        policy=_fixture_policy(),
+        input_fn=lambda _prompt: pytest.fail("noninteractive --yes must not prompt"),
+        isatty_fn=lambda: False,
+        output_fn=lambda _message: None,
+    )
+
+    assert exit_code == 0
+    assert not sentinel.exists()
     assert (target / "curation_report.json").is_file()

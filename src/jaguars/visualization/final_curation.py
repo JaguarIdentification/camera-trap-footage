@@ -149,8 +149,10 @@ class CuratedSample:
 
 @dataclass(frozen=True)
 class CurationPlan:
+    requested_source_dir: Path
     source_dir: Path
     target_dir: Path
+    resolved_target_dir: Path
     policy_version: str
     source_samples_sha256: str
     source_count: int
@@ -349,9 +351,11 @@ def build_curation_plan(
     enrichments: Mapping[str, Enrichment] | None = None,
 ) -> CurationPlan:
     """Compute and validate all curation decisions without writing output."""
-    source_root = source_dir.resolve(strict=False)
-    target_root = target_dir.resolve(strict=False)
-    if source_root == target_root:
+    requested_source = source_dir.expanduser().absolute()
+    source_root = requested_source.resolve(strict=False)
+    requested_target = target_dir.expanduser().absolute()
+    resolved_target = requested_target.resolve(strict=False)
+    if source_root == resolved_target:
         raise CurationError("source and target export directories must be distinct")
 
     payload, source_samples_sha256 = _read_source_samples(source_root)
@@ -450,8 +454,10 @@ def build_curation_plan(
     identities = [sample.terminal.jaguar_id for sample in selected]
     populated = sum(identity is not None for identity in identities)
     return CurationPlan(
+        requested_source_dir=requested_source,
         source_dir=source_root,
-        target_dir=target_root,
+        target_dir=requested_target,
+        resolved_target_dir=resolved_target,
         policy_version=policy.version,
         source_samples_sha256=source_samples_sha256,
         source_count=len(terminals),
@@ -477,7 +483,7 @@ def _curated_sample_payload(
     stable_id = hashlib.sha256(f"{policy_version}\0{terminal.relative_filepath}".encode()).hexdigest()[:24]
     payload: dict[str, object] = {
         "_id": {"$oid": stable_id},
-        "filepath": terminal.relative_filepath,
+        "filepath": str(terminal.filepath),
         "tags": [],
         "jaguar_id": terminal.jaguar_id,
     }
@@ -515,6 +521,8 @@ def _metadata_payload(plan: CurationPlan) -> dict[str, object]:
         "tags": ["final_curated"],
         "info": {
             "curation_policy_version": plan.policy_version,
+            "media_storage": "canonical_source_references",
+            "allowed_media_root": str(plan.source_dir / "data"),
             "source_export": str(plan.source_dir),
             "source_samples_sha256": plan.source_samples_sha256,
             "sample_count": plan.curated_count,
@@ -534,6 +542,8 @@ def _drop_payload(drop: CurationDrop) -> dict[str, object]:
 def _report_payload(plan: CurationPlan) -> dict[str, object]:
     return {
         "policy_version": plan.policy_version,
+        "media_storage": "canonical_source_references",
+        "allowed_media_root": str(plan.source_dir / "data"),
         "source_export": str(plan.source_dir),
         "target_export": str(plan.target_dir),
         "source_samples_sha256": plan.source_samples_sha256,
@@ -591,33 +601,7 @@ def _write_json(path: Path, payload: object) -> None:
 def _build_export(
     plan: CurationPlan,
     staging_dir: Path,
-    link_fn: Callable[[Path, Path], None],
 ) -> None:
-    for sample in plan.selected:
-        destination = staging_dir / sample.terminal.relative_filepath
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            link_fn(sample.terminal.filepath, destination)
-        except OSError as exc:
-            raise CurationError(
-                "hardlink materialization is required by the no-copy policy; " f"could not link {sample.terminal.filepath} to {destination}: {exc}"
-            ) from exc
-        try:
-            source_stat = sample.terminal.filepath.stat()
-            destination_stat = destination.stat()
-        except OSError as exc:
-            raise CurationError("hardlink materialization could not be verified for " f"{sample.terminal.relative_filepath}: {exc}") from exc
-        if destination.is_symlink() or (
-            source_stat.st_dev,
-            source_stat.st_ino,
-        ) != (
-            destination_stat.st_dev,
-            destination_stat.st_ino,
-        ):
-            raise CurationError(
-                "hardlink materialization is required by the no-copy policy; " f"{sample.terminal.relative_filepath} is not a hardlink"
-            )
-
     samples_payload = {"samples": [_curated_sample_payload(sample, plan.policy_version) for sample in plan.selected]}
     _write_json(staging_dir / "samples.json", samples_payload)
     _write_json(staging_dir / "metadata.json", _metadata_payload(plan))
@@ -629,7 +613,10 @@ def _validate_staged_export(
     staging_dir: Path,
 ) -> None:
     try:
-        terminals = load_terminal_records(staging_dir)
+        terminals = load_terminal_records(
+            staging_dir,
+            allowed_media_root=plan.source_dir / "data",
+        )
         validated = validate_records(
             [
                 (
@@ -647,6 +634,16 @@ def _validate_staged_export(
     except (TerminalExportError, IntegrityError) as exc:
         raise CurationError(f"staged export failed validation: {exc}") from exc
 
+    expected_entries = {
+        "curation_report.json",
+        "metadata.json",
+        "samples.json",
+    }
+    actual_entries = {path.name for path in staging_dir.iterdir()}
+    if actual_entries != expected_entries:
+        raise CurationError(
+            "staged export failed validation: metadata-only export contains " f"unexpected entries {sorted(actual_entries - expected_entries)!r}"
+        )
     actual_paths = tuple(record.terminal.relative_filepath for record in validated)
     if actual_paths != plan.kept_paths:
         raise CurationError("staged export failed validation: retained paths differ from " "the approved curation plan")
@@ -664,19 +661,25 @@ def materialize_curated_export(
     *,
     overwrite: bool = False,
     confirmed: bool = False,
-    link_fn: Callable[[Path, Path], None] = os.link,
 ) -> Path:
-    """Atomically materialize a validated plan using hardlinks only."""
+    """Atomically materialize metadata that references original source media."""
     target = plan.target_dir
     if target.is_symlink():
         raise CurationError(f"target export may not be a symbolic link: {target}")
+    current_resolved_target = target.resolve(strict=False)
+    if current_resolved_target != plan.resolved_target_dir:
+        raise CurationError("target export resolution changed after planning: " f"{target} -> {current_resolved_target}")
     if target.exists() and not overwrite:
         raise CurationError(f"target export already exists: {target}")
     if target.exists() and overwrite and not confirmed:
         raise CurationError("overwrite requires explicit confirmation")
-    if target == plan.source_dir or target.is_relative_to(plan.source_dir):
+    if target == plan.requested_source_dir or target.is_relative_to(plan.requested_source_dir):
         raise CurationError("target export must not be inside the source export")
-    if plan.source_dir.is_relative_to(target):
+    if plan.requested_source_dir.is_relative_to(target):
+        raise CurationError("target export must not contain the source export")
+    if current_resolved_target == plan.source_dir or current_resolved_target.is_relative_to(plan.source_dir):
+        raise CurationError("target export must not be inside the source export")
+    if plan.source_dir.is_relative_to(current_resolved_target):
         raise CurationError("target export must not contain the source export")
 
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -687,7 +690,7 @@ def materialize_curated_export(
         )
     )
     try:
-        _build_export(plan, staging, link_fn)
+        _build_export(plan, staging)
         _validate_staged_export(plan, staging)
         if not target.exists():
             try:
@@ -794,6 +797,7 @@ def run(
     *,
     policy: CurationPolicy = DEFAULT_POLICY,
     input_fn: Callable[[str], str] = input,
+    isatty_fn: Callable[[], bool] | None = None,
     output_fn: Callable[[str], None] = print,
 ) -> int:
     """Run a read-only audit or guarded materialization."""
@@ -810,6 +814,9 @@ def run(
 
     confirmed = args.yes
     if plan.target_dir.exists() and args.overwrite and not confirmed:
+        isatty = sys.stdin.isatty if isatty_fn is None else isatty_fn
+        if not isatty():
+            raise CurationError("noninteractive overwrite requires --yes")
         prompt = f"Type the exact target path '{plan.target_dir}' " "to replace the curated export: "
         try:
             confirmed = input_fn(prompt) == str(plan.target_dir)

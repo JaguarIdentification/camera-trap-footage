@@ -187,6 +187,83 @@ def test_load_terminal_records_rejects_paths_outside_export(
         load_terminal_records(terminal_export)
 
 
+def test_load_terminal_records_accepts_canonical_media_below_explicit_root(
+    terminal_export: Path,
+    tmp_path: Path,
+) -> None:
+    approved_root = tmp_path / "original/data"
+    approved_root.mkdir(parents=True)
+    source_media = approved_root / "a.jpg"
+    source_media.write_bytes((terminal_export / "data/a.jpg").read_bytes())
+    payload = _load_payload(terminal_export)
+    payload["samples"] = [payload["samples"][0]]
+    payload["samples"][0]["filepath"] = str(source_media.resolve())
+    _write_payload(terminal_export, payload)
+
+    record = load_terminal_records(
+        terminal_export,
+        allowed_media_root=approved_root,
+    )[0]
+
+    assert record.filepath == source_media.resolve()
+    assert record.relative_filepath == "data/a.jpg"
+
+
+def test_load_terminal_records_rejects_external_media_without_explicit_root(
+    terminal_export: Path,
+    tmp_path: Path,
+) -> None:
+    external = tmp_path / "original/data/a.jpg"
+    external.parent.mkdir(parents=True)
+    external.write_bytes((terminal_export / "data/a.jpg").read_bytes())
+    payload = _load_payload(terminal_export)
+    payload["samples"][0]["filepath"] = str(external)
+    _write_payload(terminal_export, payload)
+
+    with pytest.raises(TerminalExportError, match="below export directory"):
+        load_terminal_records(terminal_export)
+
+
+def test_load_terminal_records_rejects_escape_from_explicit_media_root(
+    terminal_export: Path,
+    tmp_path: Path,
+) -> None:
+    approved_root = tmp_path / "original/data"
+    approved_root.mkdir(parents=True)
+    escaped = tmp_path / "outside.jpg"
+    escaped.write_bytes((terminal_export / "data/a.jpg").read_bytes())
+    payload = _load_payload(terminal_export)
+    payload["samples"][0]["filepath"] = str(escaped)
+    _write_payload(terminal_export, payload)
+
+    with pytest.raises(TerminalExportError, match="approved media root"):
+        load_terminal_records(
+            terminal_export,
+            allowed_media_root=approved_root,
+        )
+
+
+def test_load_terminal_records_rejects_symlink_escape_from_explicit_media_root(
+    terminal_export: Path,
+    tmp_path: Path,
+) -> None:
+    approved_root = tmp_path / "original/data"
+    approved_root.mkdir(parents=True)
+    escaped = tmp_path / "outside.jpg"
+    escaped.write_bytes((terminal_export / "data/a.jpg").read_bytes())
+    linked = approved_root / "linked.jpg"
+    linked.symlink_to(escaped)
+    payload = _load_payload(terminal_export)
+    payload["samples"][0]["filepath"] = str(linked)
+    _write_payload(terminal_export, payload)
+
+    with pytest.raises(TerminalExportError, match="approved media root"):
+        load_terminal_records(
+            terminal_export,
+            allowed_media_root=approved_root,
+        )
+
+
 def test_load_terminal_records_rejects_export_root_as_media(
     terminal_export: Path,
 ) -> None:

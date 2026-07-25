@@ -36,6 +36,7 @@ from jaguars.visualization.final_validation import (
 DEFAULT_DATASET_NAME = "JaguarCameraTrap_Final_Curated_v1"
 DEFAULT_INTERMEDIATE_DIR = Path("data/intermediate/v1")
 DEFAULT_TERMINAL_EXPORT_DIR = DEFAULT_INTERMEDIATE_DIR / "fo_jaguars/labeled_segmented_jaguars_final_curated_v1"
+DEFAULT_ORIGINAL_MEDIA_ROOT = DEFAULT_INTERMEDIATE_DIR / "fo_jaguars/labeled_segmented_jaguars_primitive/data"
 DEFAULT_UPSTREAM_EXPORT_DIRS = (
     DEFAULT_INTERMEDIATE_DIR / "fo_jaguars/exports/segmented_deduplicated",
     DEFAULT_INTERMEDIATE_DIR / "fo_jaguars/exports/segmented",
@@ -112,6 +113,7 @@ class RuntimePaths:
     model_zoo_dir: Path
     plugins_dir: Path
     mount_roots: tuple[Path, ...]
+    allowed_media_root: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -502,6 +504,7 @@ def _report_paths(paths: RuntimePaths) -> dict[str, object]:
     return {
         "intermediate_dir": str(paths.intermediate_dir.resolve(strict=False)),
         "terminal_export_dir": str(paths.terminal_export_dir.resolve(strict=False)),
+        "allowed_media_root": (None if paths.allowed_media_root is None else str(paths.allowed_media_root.resolve(strict=False))),
         "upstream_export_dirs": [str(path.resolve(strict=False)) for path in paths.upstream_export_dirs],
         "manifest_paths": [str(path.resolve(strict=False)) for path in paths.manifest_paths],
         "state_root": str(paths.state_root.resolve(strict=False)),
@@ -545,7 +548,13 @@ def build_validated_records(
     expected_terminal_identity_null: int = EXPECTED_TERMINAL_IDENTITY_NULL,
 ) -> Audit:
     try:
-        terminals = load_terminal_records(paths.terminal_export_dir)
+        if paths.allowed_media_root is None:
+            terminals = load_terminal_records(paths.terminal_export_dir)
+        else:
+            terminals = load_terminal_records(
+                paths.terminal_export_dir,
+                allowed_media_root=paths.allowed_media_root,
+            )
     except Exception as error:
         raise AuditError(
             str(error),
@@ -709,6 +718,7 @@ def default_runtime_paths() -> RuntimePaths:
         model_zoo_dir=DEFAULT_MODEL_ZOO_DIR,
         plugins_dir=DEFAULT_PLUGINS_DIR,
         mount_roots=DEFAULT_MOUNT_ROOTS,
+        allowed_media_root=DEFAULT_ORIGINAL_MEDIA_ROOT,
     )
 
 
@@ -750,6 +760,7 @@ def validate_runtime_paths(
         model_zoo_dir=paths.model_zoo_dir.resolve(strict=False),
         plugins_dir=paths.plugins_dir.resolve(strict=False),
         mount_roots=tuple(path.resolve(strict=False) for path in paths.mount_roots),
+        allowed_media_root=(None if paths.allowed_media_root is None else paths.allowed_media_root.resolve(strict=False)),
     )
 
 

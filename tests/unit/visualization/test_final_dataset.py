@@ -19,6 +19,7 @@ from jaguars.visualization.final_dataset import (
     DEFAULT_DATASET_DIR,
     DEFAULT_DATASET_NAME,
     DEFAULT_MANIFEST_PATHS,
+    DEFAULT_ORIGINAL_MEDIA_ROOT,
     DEFAULT_PORT,
     DEFAULT_REPORT_DIR,
     DEFAULT_TERMINAL_EXPORT_DIR,
@@ -75,6 +76,7 @@ def test_cli_and_runtime_defaults_are_the_approved_final_snapshot_values() -> No
     )
     assert paths.terminal_export_dir == DEFAULT_TERMINAL_EXPORT_DIR
     assert paths.terminal_export_dir.name == "labeled_segmented_jaguars_final_curated_v1"
+    assert paths.allowed_media_root == DEFAULT_ORIGINAL_MEDIA_ROOT
     assert EXPECTED_SAMPLE_COUNT == 1322
     assert EXPECTED_TERMINAL_IDENTITY_POPULATED == 1108
     assert EXPECTED_TERMINAL_IDENTITY_NULL == 214
@@ -529,7 +531,10 @@ def test_build_validated_records_honors_exact_configured_lineage_paths(
 ) -> None:
     from jaguars.visualization import final_dataset
 
-    paths = _runtime_paths(tmp_path)
+    paths = replace(
+        _runtime_paths(tmp_path),
+        allowed_media_root=tmp_path / "original/data",
+    )
     validated = _record(tmp_path)
     terminal = validated.terminal
     candidate = object()
@@ -544,7 +549,7 @@ def test_build_validated_records_honors_exact_configured_lineage_paths(
     monkeypatch.setattr(
         final_dataset,
         "load_terminal_records",
-        lambda export_dir: events.append(("terminal", export_dir)) or [terminal],
+        lambda export_dir, *, allowed_media_root: events.append(("terminal", export_dir, allowed_media_root)) or [terminal],
     )
     monkeypatch.setattr(
         final_dataset,
@@ -590,7 +595,11 @@ def test_build_validated_records_honors_exact_configured_lineage_paths(
         lineage_method_counts=MappingProxyType({"source_id": 1}),
     )
     assert events == [
-        ("terminal", paths.terminal_export_dir),
+        (
+            "terminal",
+            paths.terminal_export_dir,
+            paths.allowed_media_root,
+        ),
         ("lineage", paths.upstream_export_dirs, paths.manifest_paths),
         ("index", (candidate,)),
         ("validate-records", ((terminal, enrichment),), 1),
