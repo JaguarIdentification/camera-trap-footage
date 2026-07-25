@@ -5,10 +5,11 @@ import hashlib
 import json
 import os
 import shutil
+import stat
 import sys
 import tempfile
-from collections.abc import Callable, Iterable, Mapping, Sequence
-from contextlib import suppress
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass, replace
 from pathlib import Path
 from types import MappingProxyType
@@ -167,6 +168,17 @@ class CurationPlan:
     clipped_paths: tuple[str, ...]
     review_paths: tuple[str, ...]
     selected: tuple[CuratedSample, ...]
+
+
+@dataclass(frozen=True)
+class _TargetState:
+    exists: bool
+    canonical_path: Path | None = None
+    device: int | None = None
+    inode: int | None = None
+    report_sha256: str | None = None
+    report_source_export: str | None = None
+    report_source_samples_sha256: str | None = None
 
 
 def _without_generated_ids(value: Any) -> Any:
@@ -656,6 +668,147 @@ def _validate_staged_export(
         raise CurationError("staged export failed validation: source samples.json changed " "during materialization")
 
 
+def _target_report_identity(
+    target: Path,
+) -> tuple[str | None, str | None, str | None]:
+    report_path = target / "curation_report.json"
+    try:
+        report_stat = report_path.lstat()
+    except FileNotFoundError:
+        return None, None, None
+    except OSError as exc:
+        raise CurationError(f"could not inspect existing target report {report_path}: {exc}") from exc
+    if stat.S_ISLNK(report_stat.st_mode):
+        raise CurationError(f"existing target report may not be a symbolic link: {report_path}")
+    if not stat.S_ISREG(report_stat.st_mode):
+        raise CurationError(f"existing target report must be a regular file: {report_path}")
+    try:
+        payload_bytes = report_path.read_bytes()
+    except OSError as exc:
+        raise CurationError(f"could not read existing target report {report_path}: {exc}") from exc
+    report_sha256 = hashlib.sha256(payload_bytes).hexdigest()
+    try:
+        payload = json.loads(payload_bytes)
+    except (UnicodeError, json.JSONDecodeError):
+        return report_sha256, None, None
+    if not isinstance(payload, dict):
+        return report_sha256, None, None
+    source_export = payload.get("source_export")
+    source_samples_sha256 = payload.get("source_samples_sha256")
+    return (
+        report_sha256,
+        source_export if isinstance(source_export, str) else None,
+        (source_samples_sha256 if isinstance(source_samples_sha256, str) else None),
+    )
+
+
+def _capture_target_state(target: Path) -> _TargetState:
+    try:
+        initial_stat = target.lstat()
+    except FileNotFoundError:
+        return _TargetState(exists=False)
+    except OSError as exc:
+        raise CurationError(f"could not inspect target export {target}: {exc}") from exc
+    if stat.S_ISLNK(initial_stat.st_mode):
+        raise CurationError(f"target export may not be a symbolic link: {target}")
+    if not stat.S_ISDIR(initial_stat.st_mode):
+        raise CurationError(f"target export must be a directory: {target}")
+    try:
+        canonical_path = target.resolve(strict=True)
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise CurationError(f"could not resolve existing target export {target}: {exc}") from exc
+    report_sha256, source_export, source_samples_sha256 = _target_report_identity(target)
+    try:
+        final_stat = target.lstat()
+    except OSError as exc:
+        raise CurationError(f"target changed during state capture: {target}: {exc}") from exc
+    initial_identity = (
+        initial_stat.st_dev,
+        initial_stat.st_ino,
+        initial_stat.st_mode,
+    )
+    final_identity = (
+        final_stat.st_dev,
+        final_stat.st_ino,
+        final_stat.st_mode,
+    )
+    if initial_identity != final_identity:
+        raise CurationError(f"target changed during state capture: {target}")
+    return _TargetState(
+        exists=True,
+        canonical_path=canonical_path,
+        device=final_stat.st_dev,
+        inode=final_stat.st_ino,
+        report_sha256=report_sha256,
+        report_source_export=source_export,
+        report_source_samples_sha256=source_samples_sha256,
+    )
+
+
+def _require_unchanged_target(
+    target: Path,
+    expected: _TargetState,
+) -> None:
+    try:
+        actual = _capture_target_state(target)
+    except CurationError as exc:
+        raise CurationError(f"target changed during materialization: {target}: {exc}") from exc
+    if actual != expected:
+        raise CurationError("target changed during materialization; concurrent target was " f"preserved: {target}")
+
+
+@contextmanager
+def _exclusive_target_lock(target: Path) -> Iterator[None]:
+    lock_path = target.parent / f".{target.name}.lock"
+    descriptor: int | None = None
+    owned_identity: tuple[int, int] | None = None
+    try:
+        try:
+            descriptor = os.open(
+                lock_path,
+                os.O_CREAT | os.O_EXCL | os.O_WRONLY,
+                0o600,
+            )
+        except FileExistsError as exc:
+            raise CurationError(f"curated export lock already exists: {lock_path}") from exc
+        except OSError as exc:
+            raise CurationError(f"could not acquire curated export lock {lock_path}: {exc}") from exc
+        try:
+            lock_stat = os.fstat(descriptor)
+            owned_identity = (lock_stat.st_dev, lock_stat.st_ino)
+            token = f"{os.getpid()}:{uuid4().hex}\n".encode()
+            os.write(descriptor, token)
+            os.fsync(descriptor)
+        except OSError as exc:
+            raise CurationError(f"could not initialize curated export lock {lock_path}: {exc}") from exc
+        yield
+    finally:
+        active_exception = sys.exc_info()[0] is not None
+        cleanup_error: OSError | None = None
+        if descriptor is not None and owned_identity is not None:
+            try:
+                current_stat = lock_path.lstat()
+            except FileNotFoundError:
+                pass
+            except OSError as exc:
+                cleanup_error = exc
+            else:
+                current_identity = (
+                    current_stat.st_dev,
+                    current_stat.st_ino,
+                )
+                if stat.S_ISREG(current_stat.st_mode) and current_identity == owned_identity:
+                    try:
+                        lock_path.unlink()
+                    except OSError as exc:
+                        cleanup_error = exc
+        if descriptor is not None:
+            with suppress(OSError):
+                os.close(descriptor)
+        if cleanup_error is not None and not active_exception:
+            raise CurationError(f"could not release curated export lock {lock_path}: " f"{cleanup_error}") from cleanup_error
+
+
 def materialize_curated_export(
     plan: CurationPlan,
     *,
@@ -669,10 +822,6 @@ def materialize_curated_export(
     current_resolved_target = target.resolve(strict=False)
     if current_resolved_target != plan.resolved_target_dir:
         raise CurationError("target export resolution changed after planning: " f"{target} -> {current_resolved_target}")
-    if target.exists() and not overwrite:
-        raise CurationError(f"target export already exists: {target}")
-    if target.exists() and overwrite and not confirmed:
-        raise CurationError("overwrite requires explicit confirmation")
     if target == plan.requested_source_dir or target.is_relative_to(plan.requested_source_dir):
         raise CurationError("target export must not be inside the source export")
     if plan.requested_source_dir.is_relative_to(target):
@@ -682,47 +831,67 @@ def materialize_curated_export(
     if plan.source_dir.is_relative_to(current_resolved_target):
         raise CurationError("target export must not contain the source export")
 
+    initial_target_state = _capture_target_state(target)
+    if initial_target_state.exists and initial_target_state.canonical_path != plan.resolved_target_dir:
+        raise CurationError("target export resolution changed after planning: " f"{target} -> {initial_target_state.canonical_path}")
+
     target.parent.mkdir(parents=True, exist_ok=True)
-    staging = Path(
-        tempfile.mkdtemp(
-            dir=target.parent,
-            prefix=f".{target.name}.building-",
+    with _exclusive_target_lock(target):
+        _require_unchanged_target(target, initial_target_state)
+        preflight = initial_target_state
+        if preflight.exists:
+            if not overwrite:
+                raise CurationError(f"target export already exists: {target}")
+            if not confirmed:
+                raise CurationError("overwrite requires explicit confirmation")
+        elif target.resolve(strict=False) != plan.resolved_target_dir:
+            raise CurationError("target export resolution changed after planning: " f"{target} -> {target.resolve(strict=False)}")
+
+        staging = Path(
+            tempfile.mkdtemp(
+                dir=target.parent,
+                prefix=f".{target.name}.building-",
+            )
         )
-    )
-    try:
-        _build_export(plan, staging)
-        _validate_staged_export(plan, staging)
-        if not target.exists():
+        try:
+            _build_export(plan, staging)
+            _validate_staged_export(plan, staging)
+            if not preflight.exists:
+                _require_unchanged_target(target, preflight)
+                try:
+                    os.replace(staging, target)
+                except OSError as exc:
+                    raise CurationError(f"could not publish curated export to {target}: {exc}") from exc
+                return target
+
+            backup = target.parent / f".{target.name}.backup-{uuid4().hex}"
+            _require_unchanged_target(target, preflight)
+            try:
+                os.replace(target, backup)
+            except OSError as exc:
+                raise CurationError(f"could not preserve existing target before publication: " f"{target}: {exc}") from exc
             try:
                 os.replace(staging, target)
-            except OSError as exc:
-                raise CurationError(f"could not publish curated export to {target}: {exc}") from exc
-            return target
-
-        backup = target.parent / f".{target.name}.backup-{uuid4().hex}"
-        os.replace(target, backup)
-        try:
-            os.replace(staging, target)
-        except BaseException as exc:
+            except BaseException as exc:
+                try:
+                    if not target.exists() and backup.exists():
+                        os.replace(backup, target)
+                except OSError as restore_error:
+                    raise CurationError(
+                        "could not publish curated export or restore the " f"previous target; recoverable backup remains at {backup}"
+                    ) from restore_error
+                if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+                    raise
+                raise CurationError("could not publish curated export; previous target was " "restored") from exc
             try:
-                if not target.exists() and backup.exists():
-                    os.replace(backup, target)
-            except OSError as restore_error:
-                raise CurationError(
-                    "could not publish curated export or restore the previous " f"target; recoverable backup remains at {backup}"
-                ) from restore_error
-            if isinstance(exc, (KeyboardInterrupt, SystemExit)):
-                raise
-            raise CurationError("could not publish curated export; previous target was restored") from exc
-        try:
-            shutil.rmtree(backup)
-        except OSError as exc:
-            raise CurationError(f"curated export was published but old backup remains at {backup}: {exc}") from exc
-        return target
-    finally:
-        if staging.exists():
-            with suppress(OSError):
-                shutil.rmtree(staging)
+                shutil.rmtree(backup)
+            except OSError as exc:
+                raise CurationError("curated export was published but old backup remains at " f"{backup}: {exc}") from exc
+            return target
+        finally:
+            if staging.exists():
+                with suppress(OSError):
+                    shutil.rmtree(staging)
 
 
 class _ArgumentParser(argparse.ArgumentParser):

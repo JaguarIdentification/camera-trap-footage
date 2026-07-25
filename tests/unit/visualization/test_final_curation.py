@@ -508,6 +508,181 @@ def test_materialization_rejects_media_drift_after_planning(
     assert not list(tmp_path.glob(".target.building-*"))
 
 
+@pytest.mark.parametrize("overwrite", [False, True])
+def test_materialization_preserves_target_created_during_staging(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    overwrite: bool,
+) -> None:
+    source = _write_source_export(tmp_path)
+    target = tmp_path / "target"
+    plan = build_curation_plan(source, target, policy=_fixture_policy())
+    real_validate = final_curation._validate_staged_export
+
+    def validate_then_create_concurrent_target(
+        curation_plan: final_curation.CurationPlan,
+        staging_dir: Path,
+    ) -> None:
+        real_validate(curation_plan, staging_dir)
+        target.mkdir()
+        (target / "foreign.txt").write_text("must survive", encoding="utf-8")
+
+    monkeypatch.setattr(
+        final_curation,
+        "_validate_staged_export",
+        validate_then_create_concurrent_target,
+    )
+
+    with pytest.raises(CurationError, match="target changed"):
+        materialize_curated_export(
+            plan,
+            overwrite=overwrite,
+        )
+
+    assert (target / "foreign.txt").read_text(encoding="utf-8") == "must survive"
+    assert not (target / "curation_report.json").exists()
+    assert not list(tmp_path.glob(".target.building-*"))
+    assert not list(tmp_path.glob(".target.backup-*"))
+    assert not (tmp_path / ".target.lock").exists()
+
+
+def test_materialization_preserves_replacement_of_confirmed_target(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = _write_source_export(tmp_path)
+    target = tmp_path / "target"
+    target.mkdir()
+    original = target / "original.txt"
+    original.write_text("confirmed target", encoding="utf-8")
+    displaced = tmp_path / "confirmed-target-displaced"
+    plan = build_curation_plan(source, target, policy=_fixture_policy())
+    real_validate = final_curation._validate_staged_export
+
+    def validate_then_replace_confirmed_target(
+        curation_plan: final_curation.CurationPlan,
+        staging_dir: Path,
+    ) -> None:
+        real_validate(curation_plan, staging_dir)
+        final_curation.os.replace(target, displaced)
+        target.mkdir()
+        (target / "foreign.txt").write_text("must survive", encoding="utf-8")
+
+    monkeypatch.setattr(
+        final_curation,
+        "_validate_staged_export",
+        validate_then_replace_confirmed_target,
+    )
+
+    with pytest.raises(CurationError, match="target changed"):
+        materialize_curated_export(
+            plan,
+            overwrite=True,
+            confirmed=True,
+        )
+
+    assert (target / "foreign.txt").read_text(encoding="utf-8") == "must survive"
+    assert (displaced / "original.txt").read_text(encoding="utf-8") == "confirmed target"
+    assert not list(tmp_path.glob(".target.building-*"))
+    assert not list(tmp_path.glob(".target.backup-*"))
+    assert not (tmp_path / ".target.lock").exists()
+
+
+def test_materialization_pins_existing_curation_report_identity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = _write_source_export(tmp_path)
+    target = tmp_path / "target"
+    initial_plan = build_curation_plan(source, target, policy=_fixture_policy())
+    materialize_curated_export(initial_plan)
+    replacement_plan = build_curation_plan(
+        source,
+        target,
+        policy=_fixture_policy(),
+    )
+    real_validate = final_curation._validate_staged_export
+
+    def validate_then_change_report(
+        curation_plan: final_curation.CurationPlan,
+        staging_dir: Path,
+    ) -> None:
+        real_validate(curation_plan, staging_dir)
+        report_path = target / "curation_report.json"
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+        report["source_samples_sha256"] = "foreign-source"
+        report_path.write_text(json.dumps(report), encoding="utf-8")
+
+    monkeypatch.setattr(
+        final_curation,
+        "_validate_staged_export",
+        validate_then_change_report,
+    )
+
+    with pytest.raises(CurationError, match="target changed"):
+        materialize_curated_export(
+            replacement_plan,
+            overwrite=True,
+            confirmed=True,
+        )
+
+    report = json.loads((target / "curation_report.json").read_text(encoding="utf-8"))
+    assert report["source_samples_sha256"] == "foreign-source"
+    assert not list(tmp_path.glob(".target.building-*"))
+    assert not list(tmp_path.glob(".target.backup-*"))
+    assert not (tmp_path / ".target.lock").exists()
+
+
+def test_materialization_refuses_foreign_sibling_lock_without_removing_it(
+    tmp_path: Path,
+) -> None:
+    source = _write_source_export(tmp_path)
+    target = tmp_path / "target"
+    lock = tmp_path / ".target.lock"
+    lock.write_text("foreign owner", encoding="utf-8")
+    plan = build_curation_plan(source, target, policy=_fixture_policy())
+
+    with pytest.raises(CurationError, match="lock"):
+        materialize_curated_export(plan)
+
+    assert lock.read_text(encoding="utf-8") == "foreign owner"
+    assert not target.exists()
+    assert not list(tmp_path.glob(".target.building-*"))
+
+
+def test_materialization_cleanup_never_removes_replacement_lock(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = _write_source_export(tmp_path)
+    target = tmp_path / "target"
+    lock = tmp_path / ".target.lock"
+    plan = build_curation_plan(source, target, policy=_fixture_policy())
+    real_validate = final_curation._validate_staged_export
+
+    def validate_then_replace_lock(
+        curation_plan: final_curation.CurationPlan,
+        staging_dir: Path,
+    ) -> None:
+        real_validate(curation_plan, staging_dir)
+        lock.unlink()
+        lock.write_text("foreign replacement", encoding="utf-8")
+        raise CurationError("injected validation failure")
+
+    monkeypatch.setattr(
+        final_curation,
+        "_validate_staged_export",
+        validate_then_replace_lock,
+    )
+
+    with pytest.raises(CurationError, match="injected"):
+        materialize_curated_export(plan)
+
+    assert lock.read_text(encoding="utf-8") == "foreign replacement"
+    assert not target.exists()
+    assert not list(tmp_path.glob(".target.building-*"))
+
+
 def test_materialization_requires_explicit_confirmed_overwrite_and_replaces_atomically(
     tmp_path: Path,
 ) -> None:
@@ -531,6 +706,7 @@ def test_materialization_requires_explicit_confirmed_overwrite_and_replaces_atom
     assert not sentinel.exists()
     assert (target / "curation_report.json").is_file()
     assert not list(tmp_path.glob(".target.backup-*"))
+    assert not (tmp_path / ".target.lock").exists()
 
 
 def test_overwrite_promotion_failure_restores_existing_target(

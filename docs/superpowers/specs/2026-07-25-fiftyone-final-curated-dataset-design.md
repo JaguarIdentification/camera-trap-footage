@@ -66,6 +66,12 @@ is explicitly supplied and confirmed; noninteractive overwrite additionally
 requires `--yes`, and piped text is never accepted as confirmation. A lexical
 target that is itself a symlink or has an unsafe ancestor/descendant
 relationship with the source is rejected before staging or removal.
+Materialization holds an exclusively created sibling lock through staging and
+publication. It pins whether the target was absent or, for a confirmed
+replacement, its canonical path, directory device/inode, report digest, and
+source identity. The exact state is rechecked immediately before rename. A
+concurrently created or changed target is preserved, only the owned staging
+directory is removed, and lock cleanup never unlinks a foreign replacement.
 Replacement keeps the old target recoverable until the new directory is
 ready.
 

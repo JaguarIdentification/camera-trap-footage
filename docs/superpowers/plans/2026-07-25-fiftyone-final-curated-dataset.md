@@ -71,6 +71,10 @@ removed and explicit pending-review fields/tag.
 5. Rename only after the complete staging export is written and validated,
    including strict approved-root path and pinned media-hash checks.
 6. Load the synthetic result through the terminal parser and batch validator.
+7. Hold an exclusive sibling lock across staging and publication. Pin absent
+   targets or the canonical path, directory device/inode, report digest, and
+   source identity of a confirmed existing target; recheck immediately before
+   rename and preserve any concurrent target or replacement.
 
 ## Task 3: Pending-review parser and validator contract
 
