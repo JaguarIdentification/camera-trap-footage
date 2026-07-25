@@ -83,6 +83,17 @@ def test_load_terminal_records_rejects_paths_outside_export(
         load_terminal_records(terminal_export)
 
 
+def test_load_terminal_records_rejects_export_root_as_media(
+    terminal_export: Path,
+) -> None:
+    payload = _load_payload(terminal_export)
+    payload["samples"][0]["filepath"] = "."
+    _write_payload(terminal_export, payload)
+
+    with pytest.raises(TerminalExportError, match="below export directory"):
+        load_terminal_records(terminal_export)
+
+
 @pytest.mark.parametrize("field", ["bboxes_body", "segmentations_body"])
 @pytest.mark.parametrize(
     "invalid_value",

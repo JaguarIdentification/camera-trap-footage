@@ -54,7 +54,7 @@ def _media_path(export_dir: Path, raw_filepath: object) -> tuple[Path, str]:
     candidate = supplied_path if supplied_path.is_absolute() else export_root / supplied_path
     resolved_path = candidate.resolve()
 
-    if not resolved_path.is_relative_to(export_root):
+    if resolved_path == export_root or not resolved_path.is_relative_to(export_root):
         raise TerminalExportError(
             f"filepath must resolve below export directory: {raw_filepath}"
         )
