@@ -1,5 +1,6 @@
 from collections.abc import Sequence
 from dataclasses import dataclass
+from enum import Enum, auto
 from typing import Any, cast
 from uuid import uuid4
 
@@ -108,6 +109,21 @@ class SnapshotReplacementError(SnapshotError):
 class _OwnedDataset:
     dataset_id: Any
     token: str
+
+
+class _SnapshotPhase(Enum):
+    PREFLIGHT = auto()
+    STAGED = auto()
+    PUBLISHED = auto()
+
+
+@dataclass(frozen=True)
+class _PublishedReplacement:
+    original: fo.Dataset
+    original_id: Any
+    dataset_name: str
+    backup_name: str
+    ownership: _OwnedDataset
 
 
 def _validate_decoded_mask(mask: object, context: str) -> None:
@@ -542,7 +558,7 @@ def _promote_replacement(
     ownership: _OwnedDataset,
     dataset_name: str,
     temporary_name: str,
-) -> fo.Dataset:
+) -> _PublishedReplacement:
     original_document = _database_document_by_name(dataset_name)
     if original_document is None:
         raise SnapshotReplacementError(f"old final dataset disappeared before replacement: {dataset_name}")
@@ -604,16 +620,52 @@ def _promote_replacement(
         )
         raise state_error
 
+    return _PublishedReplacement(
+        original=original,
+        original_id=original_id,
+        dataset_name=dataset_name,
+        backup_name=backup_name,
+        ownership=ownership,
+    )
+
+
+def _delete_replaced_backup(replacement: _PublishedReplacement) -> None:
+    original_document = _database_document_by_id(replacement.original_id)
+    if _document_name(original_document) != replacement.backup_name:
+        raise SnapshotReplacementError(
+            f"replacement remains published, but old backup location is "
+            f"{_document_name(original_document)!r} instead of {replacement.backup_name!r}"
+        )
+
     try:
-        original._doc.reload()
-        original_document = _database_document_by_id(original_id)
-        if _document_name(original_document) != backup_name:
-            raise SnapshotReplacementError("refusing to delete old dataset outside the verified backup name")
-        original.delete()
+        replacement.original._doc.reload()
+        replacement.original.delete()
     except BaseException as cleanup_error:
-        raise SnapshotReplacementError(f"replacement published but old backup cleanup failed at {backup_name}: {cleanup_error}") from cleanup_error
-    staged._doc.reload()
-    return staged
+        published_document = _database_document_by_name(replacement.dataset_name)
+        if not _document_has_ownership(published_document, replacement.ownership):
+            raise SnapshotReplacementError(
+                "old backup cleanup failed and the verified replacement publication changed unexpectedly"
+            ) from cleanup_error
+
+        remaining_backup = _database_document_by_id(replacement.original_id)
+        remaining_name = _document_name(remaining_backup)
+        if remaining_backup is None:
+            raise SnapshotReplacementError(
+                f"replacement remains published; old backup was already removed " f"despite cleanup error: {cleanup_error}"
+            ) from cleanup_error
+        if remaining_name == replacement.backup_name:
+            raise SnapshotReplacementError(
+                f"replacement remains published; old backup remains recoverable " f"at {replacement.backup_name}: {cleanup_error}"
+            ) from cleanup_error
+        raise SnapshotReplacementError(
+            f"replacement remains published; old dataset remains at unexpected " f"location {remaining_name!r}: {cleanup_error}"
+        ) from cleanup_error
+
+    remaining_backup = _database_document_by_id(replacement.original_id)
+    if remaining_backup is not None:
+        raise SnapshotReplacementError(
+            f"replacement remains published; old backup cleanup returned without " f"deleting {_document_name(remaining_backup)!r}"
+        )
 
 
 def create_snapshot(
@@ -626,6 +678,7 @@ def create_snapshot(
     """Atomically publish a persistent, validated FiftyOne snapshot."""
     dataset: fo.Dataset | None = None
     ownership: _OwnedDataset | None = None
+    phase = _SnapshotPhase.PREFLIGHT
     try:
         if replace_existing:
             _refuse_replacement_collisions(dataset_name, temporary_name)
@@ -638,25 +691,31 @@ def create_snapshot(
             owned_build_name,
             uuid4().hex,
         )
+        phase = _SnapshotPhase.STAGED
         _declare_schema(dataset)
         _insert_bounded(dataset, records)
         _save_views(dataset)
         _validate_snapshot(dataset, records)
         if replace_existing:
-            return _promote_replacement(
+            replacement = _promote_replacement(
                 dataset,
                 ownership,
                 dataset_name,
                 temporary_name,
             )
+            phase = _SnapshotPhase.PUBLISHED
+            _delete_replaced_backup(replacement)
+            dataset._doc.reload()
+            return dataset
         _rename_dataset(dataset, dataset_name)
         published_document = _database_document_by_name(dataset_name)
         if not _document_has_ownership(published_document, ownership):
             raise SnapshotReplacementError("snapshot publication did not persist owned staging identity")
+        phase = _SnapshotPhase.PUBLISHED
         dataset._doc.reload()
         return dataset
     except BaseException as operation_error:
-        if dataset is not None and ownership is not None:
+        if phase is not _SnapshotPhase.PUBLISHED and dataset is not None and ownership is not None:
             try:
                 _delete_owned_dataset(dataset, ownership)
             except BaseException as cleanup_error:

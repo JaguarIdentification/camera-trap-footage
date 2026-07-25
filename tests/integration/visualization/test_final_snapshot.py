@@ -917,6 +917,97 @@ def test_transactional_replacement_rollback_failure_keeps_owned_backup(
     assert not any("--build-" in name for name in fo.list_datasets())
 
 
+def test_backup_delete_failure_before_effect_retains_valid_new_final_and_old_backup(
+    tmp_path: Path,
+    dataset_names: tuple[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    final_name, temporary_name = dataset_names
+    original, _, _ = _existing_snapshot(tmp_path, final_name)
+    original_id = original._doc.id
+    real_delete = fo.Dataset.delete
+
+    def fail_old_backup_delete(dataset: fo.Dataset) -> None:
+        if dataset._doc.id == original_id:
+            raise RuntimeError("old backup delete failed before effect")
+        real_delete(dataset)
+
+    monkeypatch.setattr(fo.Dataset, "delete", fail_old_backup_delete)
+
+    with pytest.raises(
+        SnapshotReplacementError,
+        match="replacement remains published.*old backup remains recoverable",
+    ):
+        create_snapshot(
+            [_validated_record(tmp_path)],
+            final_name,
+            temporary_name,
+            replace_existing=True,
+        )
+
+    new_final = fo.load_dataset(final_name, reload=True)
+    assert new_final._doc.id != original_id
+    assert len(new_final) == 1
+    assert new_final.first().jaguar_id == "J00"
+    assert isinstance(
+        new_final.info[final_snapshot.OWNERSHIP_INFO_KEY],
+        str,
+    )
+
+    backup_names = _database_names_with_prefix(f"{temporary_name}--backup-")
+    assert len(backup_names) == 1
+    backup_document = _database_document(backup_names[0])
+    assert backup_document is not None
+    assert backup_document["_id"] == original_id
+    assert backup_document["info"]["generation"] == "old"
+    assert _database_names_with_prefix(f"{temporary_name}--build-") == []
+
+    real_delete(new_final)
+    real_delete(fo.load_dataset(backup_names[0], reload=True))
+
+
+def test_backup_delete_failure_after_effect_retains_valid_new_final_without_old_backup(
+    tmp_path: Path,
+    dataset_names: tuple[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    final_name, temporary_name = dataset_names
+    original, _, _ = _existing_snapshot(tmp_path, final_name)
+    original_id = original._doc.id
+    real_delete = fo.Dataset.delete
+
+    def delete_old_backup_then_fail(dataset: fo.Dataset) -> None:
+        real_delete(dataset)
+        if dataset._doc.id == original_id:
+            raise RuntimeError("old backup delete failed after effect")
+
+    monkeypatch.setattr(fo.Dataset, "delete", delete_old_backup_then_fail)
+
+    with pytest.raises(
+        SnapshotReplacementError,
+        match="replacement remains published.*old backup was already removed",
+    ):
+        create_snapshot(
+            [_validated_record(tmp_path)],
+            final_name,
+            temporary_name,
+            replace_existing=True,
+        )
+
+    new_final = fo.load_dataset(final_name, reload=True)
+    assert new_final._doc.id != original_id
+    assert len(new_final) == 1
+    assert new_final.first().jaguar_id == "J00"
+    assert isinstance(
+        new_final.info[final_snapshot.OWNERSHIP_INFO_KEY],
+        str,
+    )
+    assert _database_document(temporary_name) is None
+    assert _database_names_with_prefix(f"{temporary_name}--") == []
+
+    real_delete(new_final)
+
+
 def test_transactional_replacement_swaps_records_without_deleting_media_or_foreign_datasets(
     tmp_path: Path,
     dataset_names: tuple[str, str],
