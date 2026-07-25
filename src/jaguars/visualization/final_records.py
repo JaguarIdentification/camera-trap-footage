@@ -20,17 +20,27 @@ class TerminalRecord:
     filepath: Path
     relative_filepath: str
     jaguar_id: str | None
-    bboxes_body: FrozenAnnotation
-    segmentations_body: FrozenAnnotation
+    bboxes_body: FrozenAnnotation | None
+    segmentations_body: FrozenAnnotation | None
+    review_required: bool = False
+    review_reason: str | None = None
+    review_status: str | None = None
+    tags: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         """Detach annotations from caller-owned mutable containers."""
-        object.__setattr__(self, "bboxes_body", _freeze_annotation(self.bboxes_body))
-        object.__setattr__(
-            self,
-            "segmentations_body",
-            _freeze_annotation(self.segmentations_body),
-        )
+        if self.bboxes_body is not None:
+            object.__setattr__(
+                self,
+                "bboxes_body",
+                _freeze_annotation(self.bboxes_body),
+            )
+        if self.segmentations_body is not None:
+            object.__setattr__(
+                self,
+                "segmentations_body",
+                _freeze_annotation(self.segmentations_body),
+            )
 
 
 def _source_id(sample: dict[str, Any]) -> str:
@@ -124,14 +134,43 @@ def _parse_terminal_sample(
     else:
         jaguar_id = raw_jaguar_id.strip()
 
+    raw_review_required = sample.get("review_required", False)
+    if not isinstance(raw_review_required, bool):
+        raise TerminalExportError("review_required must be a boolean")
+    review_required = raw_review_required
+    review_reason: str | None = None
+    review_status: str | None = None
+    tags: tuple[str, ...] = ()
+    if review_required:
+        raw_reason = sample.get("review_reason")
+        raw_status = sample.get("review_status")
+        raw_tags = sample.get("tags")
+        if not isinstance(raw_reason, str) or not raw_reason.strip():
+            raise TerminalExportError("review_reason must be a nonempty string when review_required")
+        if raw_status != "pending":
+            raise TerminalExportError("review_status must be 'pending' when review_required")
+        if not isinstance(raw_tags, list) or "needs_annotation_review" not in raw_tags:
+            raise TerminalExportError("review sample tags must contain needs_annotation_review")
+        if any(not isinstance(tag, str) for tag in raw_tags):
+            raise TerminalExportError("review sample tags must be strings")
+        if sample.get("bboxes_body") is not None or sample.get("segmentations_body") is not None:
+            raise TerminalExportError("review samples must omit bboxes_body and segmentations_body")
+        review_reason = raw_reason.strip()
+        review_status = "pending"
+        tags = ("needs_annotation_review",)
+
     filepath, relative_filepath = _media_path(export_dir, sample.get("filepath"))
     return TerminalRecord(
         source_id=_source_id(sample),
         filepath=filepath,
         relative_filepath=relative_filepath,
         jaguar_id=jaguar_id,
-        bboxes_body=_annotation_container(sample, "bboxes_body"),
-        segmentations_body=_annotation_container(sample, "segmentations_body"),
+        bboxes_body=None if review_required else _annotation_container(sample, "bboxes_body"),
+        segmentations_body=None if review_required else _annotation_container(sample, "segmentations_body"),
+        review_required=review_required,
+        review_reason=review_reason,
+        review_status=review_status,
+        tags=tags,
     )
 
 

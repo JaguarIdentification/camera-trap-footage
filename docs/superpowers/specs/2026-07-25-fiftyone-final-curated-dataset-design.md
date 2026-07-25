@@ -2,19 +2,81 @@
 
 ## Goal
 
-Create a persistent, frozen FiftyOne snapshot containing only the terminal artifacts of the camera-trap curation process. The snapshot is named `JaguarCameraTrap_Final_Curated_v1` and contains exactly the 1,367 samples exported by `data/intermediate/v1/fo_jaguars/labeled_segmented_jaguars_primitive`.
+Create a persistent, frozen FiftyOne snapshot named
+`JaguarCameraTrap_Final_Curated_v1` containing exactly 1,322 unique retained
+artifacts from the terminal camera-trap export. The original 1,367-sample
+export at
+`data/intermediate/v1/fo_jaguars/labeled_segmented_jaguars_primitive` remains
+unchanged. A deterministic curation step materializes the independently
+loadable terminal export
+`data/intermediate/v1/fo_jaguars/labeled_segmented_jaguars_final_curated_v1`,
+which is the only default source for the final snapshot.
+
+## Curation policy
+
+The curation policy is versioned and deterministic:
+
+- Group samples by exact media SHA-256 and retain one representative from each
+  of the 39 two-sample duplicate groups.
+- Require populated identities within a hash group to agree.
+- Require semantic annotations to agree after ignoring generated detection
+  IDs.
+- Prefer an annotation-valid record, then a populated identity, then a unique
+  compatible exact-lineage match, then the lexicographically smallest
+  export-relative filepath.
+- Record every representative and dropped member in
+  `curation_report.json`.
+- Exclude the six confirmed false positives:
+  `000005-11`, `000010-8`, `000010-9`, `000015-9`, `000030-25`, and
+  `000030-6`.
+- Apply the audited in-bounds body-box values to `000004-120`, `000005-61`,
+  and `000025-40`. Their segmentation boxes and masks remain unchanged.
+- Keep `000001-143`, `000002-144`, `000010-18`, and `000005-126` without
+  re-segmentation. Remove their invalid `bboxes_body` and
+  `segmentations_body`; set `review_required=True`, a nonempty
+  `review_reason`, `review_status="pending"`, and the FiftyOne tag
+  `needs_annotation_review`.
+
+The result must contain exactly 1,322 unique paths and hashes, 1,108 populated
+identities, 214 null identities, and 59 distinct non-null labels. The four
+pending-review samples are media-only. The remaining 1,318 samples require
+valid nonempty body boxes and segmentations.
+
+## Curation storage and atomicity
+
+The curated export hardlinks retained media to the original export. It never
+copies or re-encodes media and never modifies the original export. A
+cross-filesystem or otherwise unsupported hardlink fails safely.
+
+Dry-run planning performs no writes. Creation builds a sibling temporary
+directory, writes deterministic `samples.json`, minimal `metadata.json`, and
+`curation_report.json`, validates the complete result, and only then renames
+it to the target. An existing target is refused unless `--create --overwrite`
+is explicitly supplied and confirmed; noninteractive overwrite additionally
+requires `--yes`. Replacement keeps the old target recoverable until the new
+directory is ready.
+
+The sidecar records the source `samples.json` SHA-256, policy version, counts,
+kept and dropped paths, reasons, exact-hash groups, representatives, audited
+clips, stripped review annotations, and every retained media hash.
 
 ## Final-artifact boundary
 
-Each sample uses the terminal segmented jaguar image as its primary media and retains the final `bboxes_body` and `segmentations_body` annotations. The terminal export contains 1,120 populated `jaguar_id` values and 247 null values. A null identity remains empty unless the approved exact lineage rules produce one unique compatible identity. When identity is resolved, the dataset stores both `jaguar_id` and a FiftyOne `ground_truth` `Classification` whose label equals it; otherwise both fields remain empty.
+Each ordinary snapshot sample uses the curated segmented image as primary
+media and retains final `bboxes_body` and `segmentations_body`. Pending-review
+samples retain their media, identity, lineage, and review fields but have no
+body annotations. A resolved identity is stored both as plain `jaguar_id` and
+as a FiftyOne `ground_truth` `Classification`; both are null when unresolved.
 
-The snapshot excludes raw videos, sampled frames, screenshots, earlier crops and segmentations, duplicate candidates, embeddings, deduplication scores, cache paths, temporary identifiers, random fields, and pipeline timestamps.
-
-All 1,367 terminal samples remain in the snapshot. Missing or ambiguous upstream lineage never removes a terminal sample.
+The snapshot excludes raw videos, sampled frames, screenshots, earlier crops
+and segmentations, exact-content duplicates, confirmed false positives,
+embeddings, deduplication scores, cache paths, temporary identifiers, random
+fields, and pipeline timestamps.
 
 ## Enrichment and lineage
 
-Terminal samples are enriched from upstream exports and the two terminal split manifests:
+Curated samples are enriched from upstream exports and the two split
+manifests:
 
 - `data/intermediate/v1/labels_with_splits.csv`
 - `data/intermediate/v1/pptx_extracted_labels_with_splits.csv`
@@ -24,121 +86,103 @@ Lineage matching uses only these precedence-ordered exact methods:
 1. Preserved FiftyOne or source sample ID
 2. Normalized source filepath
 3. Export-relative filepath
-4. Exact filename when it is unique across all candidate records
+4. Exact filename when globally unique
 
-The implementation must not use fuzzy filenames, inferred numeric prefixes, image similarity, or best guesses. Every sample receives `lineage_status` with `matched`, `ambiguous`, or `missing`, plus a `lineage_match_method` when matched.
+No fuzzy filenames, numeric-prefix inference, image similarity, or best guess
+is allowed. Every sample receives `lineage_status` (`matched`, `ambiguous`, or
+`missing`) and, when matched, `lineage_match_method`.
 
-The curated enrichment schema contains:
+The enrichment boundary contains identity and ground truth; closed- and
+open-set splits; sighting, site, location, camera, and capture-time fields;
+source provenance; and SHA-256, byte size, width, and height. Missing or
+ambiguous lineage is reported but does not remove a retained sample.
 
-- Identity: optional `jaguar_id` and `ground_truth`
-- Evaluation: `closed_set_split`, `open_set_split`
-- Capture grouping: `sighting_id`
-- Location and device: `site`, `location`, `camera_id`, `camera_side`, `camera_model`, `latitude`, `longitude`
-- Capture time: `capture_date`, `capture_time`, `capture_datetime`
-- Provenance: `original_filename`, `source_media_path`, `source_type`, `lineage_status`, `lineage_match_method`
-- Integrity: `sha256`, file size, width, height
+## FiftyOne storage and immutability
 
-`closed_set_split` and `open_set_split` are independent string fields containing `train`, `val`, or `test`. The closed-set protocol evaluates identities represented in training. The open-set protocol also evaluates identities withheld from training.
+FiftyOne references curated hardlinks in place. Generated state stays on
+external storage:
 
-## Storage and immutability
-
-FiftyOne references the existing terminal images without copying them. Every image receives a SHA-256 digest so later media drift can be detected.
-
-Generated state stays on external storage:
-
-- FiftyOne database: `/Volumes/CameraTrapPython/fiftyone/var/lib/mongo`
-- Reports: `/Volumes/CameraTrapPython/fiftyone/JaguarCameraTrap_Final_Curated_v1`
+- Database: `/Volumes/CameraTrapPython/fiftyone/var/lib/mongo`
+- Reports:
+  `/Volumes/CameraTrapPython/fiftyone/JaguarCameraTrap_Final_Curated_v1`
 - Dataset/download defaults: `/Volumes/CameraTrapPython/fiftyone/datasets`
 
-Creation refuses to run unless `/Volumes/Extreme SSD` and `/Volumes/CameraTrapPython` are actual mounted filesystems and every configured generated-state path resolves below `/Volumes/CameraTrapPython/fiftyone`.
+Snapshot creation requires `/Volumes/Extreme SSD` and
+`/Volumes/CameraTrapPython` to be mounted filesystems. Every generated-state
+path must resolve below `/Volumes/CameraTrapPython/fiftyone`. FiftyOne is
+configured and revalidated before import; inherited URI/private-port
+configuration or a redirected database is rejected.
 
-FiftyOne is configured before import. An inherited database URI or private database port is rejected, an existing config file may not redirect the database, and the imported FiftyOne configuration is revalidated against the exact approved database directory.
+Ordinary creation refuses an existing final dataset. `--overwrite` prints
+existing and proposed counts and requires confirmation; `--yes` is required
+for noninteractive replacement. Confirmation pins the original persisted
+dataset ID. Snapshot staging, ownership tokens, promotion, recovery, and
+backup cleanup follow the existing compare-and-swap transaction; media is
+never deleted.
 
-The snapshot is immutable during ordinary operation. If the final dataset already exists, creation fails. Replacement requires `--overwrite`, prints existing and proposed sample counts, and requires interactive confirmation. Noninteractive replacement additionally requires `--yes`. Confirmation pins the persisted ID of the original final dataset. Replacement first builds and validates an ownership-unique staging dataset while the old final remains published, then compare-and-swaps only if that exact original ID still owns the final name. The generated staging name is collision-checked before construction, and the adapter persists an unguessable ownership token in dataset metadata before any destructive cleanup or promotion is permitted. It then renames the old final to an ownership-unique backup, promotes staging, and deletes the backup only after successful promotion. Promotion failure re-queries database names and IDs, removes a promoted dataset only when its persisted ID and token prove ownership, restores the old final when the name is available, and never deletes a foreign claimant. Once promotion is database-verified, the transaction enters a published phase: any old-backup deletion error is classified by a database re-query, reports whether the backup remains recoverable or was already removed, and never removes the valid new final. Media is never deleted.
+## Commands
 
-## Atomic creation
-
-Creation builds a temporary persistent FiftyOne dataset. All source and constructed-dataset checks run before the temporary dataset is renamed to `JaguarCameraTrap_Final_Curated_v1`. A failed build removes a temporary dataset only when a database re-query proves its generated ID and persisted ownership token. If the FiftyOne constructor fails after inserting metadata but before ownership can be persisted, the unproven artifact is retained with an explicit recoverable-artifact error rather than risking deletion of a racing foreign dataset. Transactional replacement applies the same validation before any rename and rolls back the old final if promotion fails. It never removes an existing final before the replacement is complete or changes any media.
-
-## Command-line interface
-
-The normal command is:
+Audit or materialize the curated terminal export:
 
 ```bash
+uv run python -m jaguars.visualization.final_curation --dry-run
+uv run python -m jaguars.visualization.final_curation --create
+```
+
+Audit, create, or launch the frozen snapshot:
+
+```bash
+uv run python -m jaguars.visualization.final_dataset --dry-run
+uv run python -m jaguars.visualization.final_dataset --create-only
 uv run python -m jaguars.visualization.final_dataset
 ```
 
-Default behavior validates storage, audits source consistency, creates the snapshot when absent, writes a JSON report, launches the FiftyOne App on `localhost:5151`, and remains alive until interrupted.
-
-Supported modes are:
-
-- `--dry-run`: audit and report without database writes or App launch
-- `--create-only`: create and verify without launching the App
-- `--launch-only`: launch an existing snapshot without rebuilding it
-- `--overwrite`: explicitly replace the exact final dataset
-- `--yes`: allow noninteractive overwrite; valid only with `--overwrite`
-- `--address` and `--port`: configure the App listener
-
-Mutually incompatible modes fail during argument validation.
+The snapshot CLI also supports `--launch-only`, guarded `--overwrite`,
+noninteractive `--yes`, and App `--address`/`--port`.
 
 ## Saved views
 
-The snapshot includes:
+The snapshot has exactly nine saved views:
 
 - `All final samples`
 - `Lineage issues`
 - Closed-set `train`, `val`, and `test`
 - Open-set `train`, `val`, and `test`
-
-Jaguar identities remain filterable through `jaguar_id`; the implementation does not create hundreds of per-identity saved views.
+- `Annotation review`
 
 ## Integrity policy
 
-Creation fails if:
-
-- Any referenced final image is missing or unreadable
-- Final filepaths or content hashes are duplicated
-- Populated `jaguar_id` and `ground_truth.label` disagree, or only one of the pair is populated
-- A body mask or bounding box is malformed
-- The constructed sample count differs from the terminal export count
-
-Missing and ambiguous lineage are reported but are not fatal.
-
-Each run report records the exact upstream export and manifest paths, terminal and resolved identity counts separately, source and constructed counts, annotation/enrichment/media failures, duplicate-path and duplicate-hash group and pair counts, lineage counts and methods, saved-view creation, the phase reached, and any failure.
-
-## Components
-
-The implementation uses focused modules under `jaguars.visualization`:
-
-- Export parsing converts the terminal FiftyOne export into plain immutable records without opening the production database.
-- Lineage enrichment builds exact indexes over upstream exports and manifests, applies precedence rules, and returns enrichment plus status.
-- Validation checks media, hashes, annotations, schema invariants, and snapshot counts.
-- Snapshot creation maps validated records to FiftyOne samples, creates saved views, and performs the atomic rename.
-- The CLI owns storage configuration, mode validation, reporting, overwrite confirmation, and App lifecycle.
-
-Pure parsing, enrichment, and validation code remains independently testable without importing FiftyOne. Validation rejects malformed masks and bounding boxes, unsupported split values, and non-finite or incorrectly typed scalar enrichment values.
+Creation fails for missing or unreadable media, duplicate canonical paths or
+hashes, count or frozen identity drift, invalid enrichment, identity/
+ground-truth disagreement, or malformed ordinary annotations. Missing
+annotations are allowed only when `review_required=True`, the reason is
+nonempty, the status is `pending`, and the review tag is present. Review
+samples must omit both annotation fields.
 
 ## Testing and acceptance
 
-Unit tests cover export parsing, exact and ambiguous lineage joins, schema mapping, content hashes, malformed annotations, duplicate detection, CLI validation, overwrite safety, and external-path guards.
+Unit tests cover representative selection and conflicts, semantic annotation
+normalization, exact counts, clips, exclusions, sidecars, hardlink evidence,
+unsupported hardlinks, atomic failure cleanup, guarded overwrite, parser and
+validator compatibility, CLI defaults, and review contracts.
 
-An integration test uses a temporary isolated FiftyOne database and image fixtures to verify atomic creation, schema, annotations, saved views, immutability, token-proven cleanup, generated-name collisions, constructor races, and rename failures both before and after database persistence. Tests never connect to or mutate the production database.
+An isolated FiftyOne integration suite verifies schema, media-only review
+samples, all nine views, immutable construction, ownership-safe cleanup, and
+replacement recovery without touching production.
 
-Before production creation, a real-data `--dry-run` must verify the acceptance targets below. The current read-only mounted-data audit deliberately fails eligibility while reporting:
+The required read-only real-data curation audit verifies:
 
-- 1,367 terminal samples, with exactly 1,120 populated and 247 null terminal identities
-- 15 annotation-invalid samples
-- no enrichment-invalid or unreadable-media samples
-- 1,367 unique media paths
-- 1,328 unique SHA-256 values and 39 duplicate-hash pairs
+- 1,367 source records
+- 39 exact-content duplicate drops
+- 6 confirmed false-positive drops
+- 1,322 retained unique paths and hashes
+- 1,108 populated and 214 null identities
+- 59 non-null labels
+- 3 audited bbox clips
+- 4 pending-review media-only samples
 
-Production creation remains blocked until the annotation and duplicate-content failures are corrected. Its acceptance targets are:
-
-- 1,367 terminal samples discovered
-- 1,120 terminal identities populated and all 247 null terminal identities preserved unless uniquely resolved by exact lineage
-- 1,367 unique readable media paths
-- 1,367 unique SHA-256 values
-- Valid final identity, bounding-box, and segmentation fields
-- Complete lineage-status accounting
-
-After creation, verification must confirm the same sample count, all required fields and saved views, identity agreement, content hashes, and successful App launch.
+After the curated export is materialized, its parser/validator audit must be
+green before production snapshot creation. Production verification then
+confirms 1,322 samples, 1,318 populated annotation pairs, four pending-review
+records, identity agreement, required fields, unique hashes, all nine saved
+views, and successful App launch.

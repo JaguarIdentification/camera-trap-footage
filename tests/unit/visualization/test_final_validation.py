@@ -160,6 +160,90 @@ def test_validate_annotations_rejects_malformed_nonempty_serialized_mask(
         validate_annotations(terminal)
 
 
+def test_validate_annotations_allows_missing_annotations_only_for_pending_review(
+    tmp_path: Path,
+) -> None:
+    review = TerminalRecord(
+        source_id="review",
+        filepath=tmp_path / "review.png",
+        relative_filepath="data/review.png",
+        jaguar_id="F14",
+        bboxes_body=None,
+        segmentations_body=None,
+        review_required=True,
+        review_reason="zero-area mask",
+        review_status="pending",
+        tags=("needs_annotation_review",),
+    )
+
+    validate_annotations(review)
+
+    ordinary = TerminalRecord(
+        source_id="ordinary",
+        filepath=tmp_path / "ordinary.png",
+        relative_filepath="data/ordinary.png",
+        jaguar_id="F14",
+        bboxes_body=None,
+        segmentations_body=None,
+    )
+    with pytest.raises(IntegrityError, match="only allowed"):
+        validate_annotations(ordinary)
+
+
+@pytest.mark.parametrize(
+    ("reason", "status", "tags"),
+    [
+        (None, "pending", ("needs_annotation_review",)),
+        ("zero-area mask", None, ("needs_annotation_review",)),
+        ("zero-area mask", "pending", ()),
+    ],
+)
+def test_validate_annotations_requires_complete_review_metadata(
+    tmp_path: Path,
+    reason: str | None,
+    status: str | None,
+    tags: tuple[str, ...],
+) -> None:
+    review = TerminalRecord(
+        source_id="review",
+        filepath=tmp_path / "review.png",
+        relative_filepath="data/review.png",
+        jaguar_id="F14",
+        bboxes_body=None,
+        segmentations_body=None,
+        review_required=True,
+        review_reason=reason,
+        review_status=status,
+        tags=tags,
+    )
+
+    with pytest.raises(IntegrityError, match="review"):
+        validate_annotations(review)
+
+
+def test_validate_records_accepts_readable_pending_review_media(
+    tmp_path: Path,
+) -> None:
+    image_path = tmp_path / "review.png"
+    Image.new("RGB", (8, 6)).save(image_path)
+    review = TerminalRecord(
+        source_id="review",
+        filepath=image_path,
+        relative_filepath="data/review.png",
+        jaguar_id="F14",
+        bboxes_body=None,
+        segmentations_body=None,
+        review_required=True,
+        review_reason="zero-area mask",
+        review_status="pending",
+        tags=("needs_annotation_review",),
+    )
+
+    records = validate_records([(review, _enrichment())], expected_count=1)
+
+    assert records[0].terminal.review_required is True
+
+
 @pytest.mark.parametrize(
     "invalid",
     [

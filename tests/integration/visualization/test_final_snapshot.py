@@ -197,6 +197,21 @@ def _with_segmentation_mask(record: ValidatedRecord, mask: object) -> ValidatedR
     return replace(record, terminal=terminal)
 
 
+def _as_annotation_review(record: ValidatedRecord) -> ValidatedRecord:
+    return replace(
+        record,
+        terminal=replace(
+            record.terminal,
+            bboxes_body=None,
+            segmentations_body=None,
+            review_required=True,
+            review_reason="zero-area mask",
+            review_status="pending",
+            tags=("needs_annotation_review",),
+        ),
+    )
+
+
 def test_validated_record_maps_only_approved_schema_and_reconstructs_labels(
     tmp_path: Path,
 ) -> None:
@@ -255,6 +270,19 @@ def test_sample_identity_is_optional_and_uses_only_resolved_lineage(
     assert resolved_sample.ground_truth.label == "F11"
 
 
+def test_pending_review_maps_as_tagged_media_only_sample(tmp_path: Path) -> None:
+    record = _as_annotation_review(_validated_record(tmp_path))
+
+    sample = validated_record_to_sample(record)
+
+    assert sample.bboxes_body is None
+    assert sample.segmentations_body is None
+    assert sample.review_required is True
+    assert sample.review_reason == "zero-area mask"
+    assert sample.review_status == "pending"
+    assert sample.tags == ["needs_annotation_review"]
+
+
 def test_snapshot_preserves_sample_with_unresolved_identity(
     tmp_path: Path,
     dataset_names: tuple[str, str],
@@ -271,7 +299,7 @@ def test_snapshot_preserves_sample_with_unresolved_identity(
     assert len(dataset) == 1
 
 
-def test_snapshot_declares_schema_inserts_persists_and_saves_eight_views(
+def test_snapshot_declares_schema_inserts_persists_and_saves_nine_views(
     tmp_path: Path,
     dataset_names: tuple[str, str],
 ) -> None:
@@ -292,6 +320,9 @@ def test_snapshot_declares_schema_inserts_persists_and_saves_eight_views(
         "ground_truth": fof.EmbeddedDocumentField,
         "bboxes_body": fof.EmbeddedDocumentField,
         "segmentations_body": fof.EmbeddedDocumentField,
+        "review_required": fof.BooleanField,
+        "review_reason": fof.StringField,
+        "review_status": fof.StringField,
         "lineage_status": fof.StringField,
         "lineage_match_method": fof.StringField,
         "closed_set_split": fof.StringField,
@@ -331,6 +362,7 @@ def test_snapshot_declares_schema_inserts_persists_and_saves_eight_views(
     assert len(dataset.load_saved_view("Open-set train")) == 2
     assert len(dataset.load_saved_view("Open-set val")) == 2
     assert len(dataset.load_saved_view("Open-set test")) == 2
+    assert len(dataset.load_saved_view("Annotation review")) == 0
 
     loaded = fo.load_dataset(final_name)
     persisted = loaded[str(dataset.first().id)]
@@ -339,6 +371,25 @@ def test_snapshot_declares_schema_inserts_persists_and_saves_eight_views(
         persisted.segmentations_body.detections[0].mask,
         np.array([[0, 1], [1, 0]], dtype=np.uint8),
     )
+
+
+def test_snapshot_preserves_pending_review_and_annotation_review_view(
+    tmp_path: Path,
+    dataset_names: tuple[str, str],
+) -> None:
+    final_name, temporary_name = dataset_names
+    review = _as_annotation_review(_validated_record(tmp_path))
+
+    dataset = create_snapshot([review], final_name, temporary_name)
+
+    sample = dataset.first()
+    assert sample.bboxes_body is None
+    assert sample.segmentations_body is None
+    assert sample.review_required is True
+    assert sample.review_reason == "zero-area mask"
+    assert sample.review_status == "pending"
+    assert sample.tags == ["needs_annotation_review"]
+    assert len(dataset.load_saved_view("Annotation review")) == 1
 
 
 @pytest.mark.parametrize("explicit_none", [False, True])

@@ -23,6 +23,9 @@ from jaguars.visualization.final_dataset import (
     DEFAULT_REPORT_DIR,
     DEFAULT_TERMINAL_EXPORT_DIR,
     DEFAULT_UPSTREAM_EXPORT_DIRS,
+    EXPECTED_SAMPLE_COUNT,
+    EXPECTED_TERMINAL_IDENTITY_NULL,
+    EXPECTED_TERMINAL_IDENTITY_POPULATED,
     DatasetExistsError,
     OverwriteDeclinedError,
     RunReport,
@@ -71,6 +74,10 @@ def test_cli_and_runtime_defaults_are_the_approved_final_snapshot_values() -> No
         DEFAULT_PORT,
     )
     assert paths.terminal_export_dir == DEFAULT_TERMINAL_EXPORT_DIR
+    assert paths.terminal_export_dir.name == "labeled_segmented_jaguars_final_curated_v1"
+    assert EXPECTED_SAMPLE_COUNT == 1322
+    assert EXPECTED_TERMINAL_IDENTITY_POPULATED == 1108
+    assert EXPECTED_TERMINAL_IDENTITY_NULL == 214
     assert paths.upstream_export_dirs == DEFAULT_UPSTREAM_EXPORT_DIRS
     assert paths.manifest_paths == DEFAULT_MANIFEST_PATHS
     assert paths.database_dir == DEFAULT_DATABASE_DIR
@@ -101,7 +108,7 @@ def test_overwrite_confirmation_requires_the_exact_dataset_name(answer: str) -> 
         confirm_overwrite(
             "JaguarCameraTrap_Final_Curated_v1",
             existing_count=1200,
-            proposed_count=1367,
+            proposed_count=1322,
             input_fn=lambda _prompt: answer,
         )
         is False
@@ -113,7 +120,7 @@ def test_overwrite_confirmation_accepts_the_exact_dataset_name() -> None:
         confirm_overwrite(
             "JaguarCameraTrap_Final_Curated_v1",
             existing_count=1200,
-            proposed_count=1367,
+            proposed_count=1322,
             input_fn=lambda _prompt: "JaguarCameraTrap_Final_Curated_v1",
         )
         is True
@@ -123,7 +130,7 @@ def test_overwrite_confirmation_accepts_the_exact_dataset_name() -> None:
 def test_default_confirmation_reads_builtins_input_dynamically(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("builtins.input", lambda _prompt: DEFAULT_DATASET_NAME)
 
-    assert confirm_overwrite(DEFAULT_DATASET_NAME, 1200, 1367) is True
+    assert confirm_overwrite(DEFAULT_DATASET_NAME, 1200, 1322) is True
 
 
 def test_fiftyone_paths_are_configured_before_any_lazy_import(tmp_path: Path) -> None:
@@ -681,6 +688,42 @@ def test_report_identity_population_counts_only_resolved_values(tmp_path: Path) 
 
     assert report.field_population["jaguar_id"] == 1
     assert report.field_population["ground_truth"] == 1
+
+
+def test_report_counts_annotations_and_review_fields_by_actual_population(
+    tmp_path: Path,
+) -> None:
+    ordinary = _record(tmp_path)
+    review = replace(
+        ordinary,
+        terminal=replace(
+            ordinary.terminal,
+            source_id="review",
+            filepath=tmp_path / "review.jpg",
+            relative_filepath="data/review.jpg",
+            bboxes_body=None,
+            segmentations_body=None,
+            review_required=True,
+            review_reason="zero-area mask",
+            review_status="pending",
+            tags=("needs_annotation_review",),
+        ),
+        integrity=replace(ordinary.integrity, sha256="b" * 64),
+    )
+
+    report = RunReport.from_audit(
+        Audit(
+            records=(ordinary, review),
+            terminal_count=2,
+            lineage_candidate_count=0,
+        )
+    )
+
+    assert report.field_population["bboxes_body"] == 1
+    assert report.field_population["segmentations_body"] == 1
+    assert report.field_population["review_required"] == 2
+    assert report.field_population["review_reason"] == 1
+    assert report.field_population["review_status"] == 1
 
 
 def test_report_separates_frozen_terminal_and_resolved_identity_counts(

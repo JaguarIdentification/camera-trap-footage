@@ -57,13 +57,15 @@ def test_load_terminal_records_resolves_paths_ids_and_annotations(
 def test_terminal_records_are_frozen_and_drop_transient_fields(
     terminal_export: Path,
 ) -> None:
-    record = load_terminal_records(terminal_export)[0]
+    records = load_terminal_records(terminal_export)
+    record = records[0]
 
     with pytest.raises(FrozenInstanceError):
         record.jaguar_id = "changed"  # type: ignore[misc]
     assert not hasattr(record, "_dataset_id")
     assert not hasattr(record, "_rand")
-    assert not hasattr(record, "tags")
+    assert record.tags == ()
+    assert records[1].tags == ()
     assert not hasattr(record, "created_at")
 
 
@@ -235,4 +237,59 @@ def test_load_terminal_records_rejects_malformed_or_empty_annotations(
     _write_payload(terminal_export, payload)
 
     with pytest.raises(TerminalExportError, match=field):
+        load_terminal_records(terminal_export)
+
+
+def test_load_terminal_records_accepts_media_only_pending_review_sample(
+    terminal_export: Path,
+) -> None:
+    payload = _load_payload(terminal_export)
+    sample = payload["samples"][0]
+    del sample["bboxes_body"]
+    del sample["segmentations_body"]
+    sample["tags"] = ["needs_annotation_review"]
+    sample["review_required"] = True
+    sample["review_reason"] = "zero-area mask"
+    sample["review_status"] = "pending"
+    _write_payload(terminal_export, payload)
+
+    record = load_terminal_records(terminal_export)[1]
+
+    assert record.bboxes_body is None
+    assert record.segmentations_body is None
+    assert record.review_required is True
+    assert record.review_reason == "zero-area mask"
+    assert record.review_status == "pending"
+    assert record.tags == ("needs_annotation_review",)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("review_reason", ""),
+        ("review_status", "complete"),
+        ("tags", []),
+    ],
+)
+def test_load_terminal_records_rejects_incomplete_review_contract(
+    terminal_export: Path,
+    field: str,
+    value: object,
+) -> None:
+    payload = _load_payload(terminal_export)
+    sample = payload["samples"][0]
+    del sample["bboxes_body"]
+    del sample["segmentations_body"]
+    sample.update(
+        {
+            "tags": ["needs_annotation_review"],
+            "review_required": True,
+            "review_reason": "zero-area mask",
+            "review_status": "pending",
+        }
+    )
+    sample[field] = value
+    _write_payload(terminal_export, payload)
+
+    with pytest.raises(TerminalExportError, match="review"):
         load_terminal_records(terminal_export)

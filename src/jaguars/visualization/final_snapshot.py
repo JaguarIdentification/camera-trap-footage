@@ -41,6 +41,9 @@ APPROVED_SAMPLE_FIELDS = (
     "ground_truth",
     "bboxes_body",
     "segmentations_body",
+    "review_required",
+    "review_reason",
+    "review_status",
     "lineage_status",
     "lineage_match_method",
     *APPROVED_ENRICHMENT_FIELDS,
@@ -59,6 +62,7 @@ SAVED_VIEW_NAMES = (
     "Open-set train",
     "Open-set val",
     "Open-set test",
+    "Annotation review",
 )
 
 _STRING_ENRICHMENT_FIELDS = (
@@ -79,8 +83,7 @@ _SPLIT_FIELDS = ("closed_set_split", "open_set_split")
 _APPROVED_SPLITS = frozenset(("train", "val", "test"))
 _FLOAT_ENRICHMENT_FIELDS = ("latitude", "longitude")
 _REQUIRED_VALUE_FIELDS = (
-    "bboxes_body",
-    "segmentations_body",
+    "review_required",
     "lineage_status",
     "sha256",
     "size_bytes",
@@ -215,13 +218,21 @@ def validated_record_to_sample(record: ValidatedRecord) -> fo.Sample:
     resolved_identity = record.resolved_jaguar_id
     return fo.Sample(
         filepath=str(terminal.filepath),
+        tags=list(terminal.tags),
         jaguar_id=resolved_identity,
         ground_truth=None if resolved_identity is None else fo.Classification(label=resolved_identity),
-        bboxes_body=_detections_from_export(terminal.bboxes_body, "bboxes_body"),
-        segmentations_body=_detections_from_export(
-            terminal.segmentations_body,
-            "segmentations_body",
+        bboxes_body=None if terminal.bboxes_body is None else _detections_from_export(terminal.bboxes_body, "bboxes_body"),
+        segmentations_body=(
+            None
+            if terminal.segmentations_body is None
+            else _detections_from_export(
+                terminal.segmentations_body,
+                "segmentations_body",
+            )
         ),
+        review_required=terminal.review_required,
+        review_reason=terminal.review_reason,
+        review_status=terminal.review_status,
         lineage_status=record.enrichment.status,
         lineage_match_method=record.enrichment.match_method,
         **enrichment,
@@ -240,6 +251,8 @@ def _declare_schema(dataset: fo.Dataset) -> None:
     }
     string_fields = (
         "jaguar_id",
+        "review_reason",
+        "review_status",
         "lineage_status",
         "lineage_match_method",
         *_SPLIT_FIELDS,
@@ -258,6 +271,7 @@ def _declare_schema(dataset: fo.Dataset) -> None:
         dataset.add_sample_field(field_name, fof.FloatField)
     for field_name in ("size_bytes", "width", "height"):
         dataset.add_sample_field(field_name, fof.IntField)
+    dataset.add_sample_field("review_required", fof.BooleanField)
 
 
 def _save_views(dataset: fo.Dataset) -> None:
@@ -276,6 +290,10 @@ def _save_views(dataset: fo.Dataset) -> None:
             f"Open-set {split}",
             dataset.match(F("open_set_split") == split),
         )
+    dataset.save_view(
+        "Annotation review",
+        dataset.match(F("review_required")),
+    )
 
 
 def _expected_identity(record: ValidatedRecord) -> tuple[object, ...]:
@@ -315,6 +333,19 @@ def _validate_required_fields(dataset: fo.Dataset) -> None:
         missing_values = [field for field in _REQUIRED_VALUE_FIELDS if sample.get_field(field) is None]
         if missing_values:
             raise SnapshotValidationError(f"required fields missing values for {sample.filepath}: {', '.join(missing_values)}")
+        if sample.review_required:
+            if sample.bboxes_body is not None or sample.segmentations_body is not None:
+                raise SnapshotValidationError(f"pending review sample must omit annotations: {sample.filepath}")
+            if not isinstance(sample.review_reason, str) or not sample.review_reason.strip():
+                raise SnapshotValidationError(f"pending review sample requires review_reason: {sample.filepath}")
+            if sample.review_status != "pending":
+                raise SnapshotValidationError(f"pending review sample requires review_status='pending': {sample.filepath}")
+            if "needs_annotation_review" not in sample.tags:
+                raise SnapshotValidationError(f"pending review sample requires needs_annotation_review tag: {sample.filepath}")
+        else:
+            missing_annotations = [field_name for field_name in ("bboxes_body", "segmentations_body") if sample.get_field(field_name) is None]
+            if missing_annotations:
+                raise SnapshotValidationError(f"required annotations missing for {sample.filepath}: " f"{', '.join(missing_annotations)}")
 
 
 def _validate_split_values(dataset: fo.Dataset) -> None:

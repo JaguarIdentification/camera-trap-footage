@@ -35,7 +35,7 @@ from jaguars.visualization.final_validation import (
 
 DEFAULT_DATASET_NAME = "JaguarCameraTrap_Final_Curated_v1"
 DEFAULT_INTERMEDIATE_DIR = Path("data/intermediate/v1")
-DEFAULT_TERMINAL_EXPORT_DIR = DEFAULT_INTERMEDIATE_DIR / "fo_jaguars/labeled_segmented_jaguars_primitive"
+DEFAULT_TERMINAL_EXPORT_DIR = DEFAULT_INTERMEDIATE_DIR / "fo_jaguars/labeled_segmented_jaguars_final_curated_v1"
 DEFAULT_UPSTREAM_EXPORT_DIRS = (
     DEFAULT_INTERMEDIATE_DIR / "fo_jaguars/exports/segmented_deduplicated",
     DEFAULT_INTERMEDIATE_DIR / "fo_jaguars/exports/segmented",
@@ -57,9 +57,9 @@ DEFAULT_MOUNT_ROOTS = (Path("/Volumes/Extreme SSD"), Path("/Volumes/CameraTrapPy
 DEFAULT_ADDRESS = "localhost"
 DEFAULT_PORT = 5151
 APPROVED_DATABASE_NAME = "fiftyone"
-EXPECTED_SAMPLE_COUNT = 1367
-EXPECTED_TERMINAL_IDENTITY_POPULATED = 1120
-EXPECTED_TERMINAL_IDENTITY_NULL = 247
+EXPECTED_SAMPLE_COUNT = 1322
+EXPECTED_TERMINAL_IDENTITY_POPULATED = 1108
+EXPECTED_TERMINAL_IDENTITY_NULL = 214
 _REPORT_ENRICHMENT_FIELDS = (
     "closed_set_split",
     "open_set_split",
@@ -519,8 +519,11 @@ def _audit_field_population(records: Sequence[ValidatedRecord]) -> dict[str, int
     fields = {
         "jaguar_id": resolved_identity_count,
         "ground_truth": resolved_identity_count,
-        "bboxes_body": len(records),
-        "segmentations_body": len(records),
+        "bboxes_body": sum(record.terminal.bboxes_body is not None for record in records),
+        "segmentations_body": sum(record.terminal.segmentations_body is not None for record in records),
+        "review_required": len(records),
+        "review_reason": sum(record.terminal.review_reason is not None for record in records),
+        "review_status": sum(record.terminal.review_status is not None for record in records),
         "lineage_status": len(records),
         "lineage_match_method": sum(record.enrichment.match_method is not None for record in records),
         "sha256": len(records),

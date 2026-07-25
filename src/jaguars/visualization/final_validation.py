@@ -153,14 +153,37 @@ def validate_annotations(terminal: TerminalRecord) -> None:
     """Validate terminal body boxes and serialized body masks."""
     context = terminal.relative_filepath
     errors: list[str] = []
+    missing_bboxes = terminal.bboxes_body is None
+    missing_segmentations = terminal.segmentations_body is None
+    if missing_bboxes or missing_segmentations:
+        if not terminal.review_required:
+            raise IntegrityError(f"{context}: missing body annotations are only allowed when review_required is true")
+        if not missing_bboxes or not missing_segmentations:
+            errors.append(f"{context}: review samples must omit both bboxes_body and segmentations_body")
+        if not isinstance(terminal.review_reason, str) or not terminal.review_reason.strip():
+            errors.append(f"{context}: review_reason must be nonempty when review_required")
+        if terminal.review_status != "pending":
+            errors.append(f"{context}: review_status must be pending when review_required")
+        if "needs_annotation_review" not in terminal.tags:
+            errors.append(f"{context}: review tags must contain needs_annotation_review")
+        if errors:
+            raise IntegrityError("; ".join(errors))
+        return
+    if terminal.review_required:
+        raise IntegrityError(f"{context}: review samples must omit bboxes_body and segmentations_body")
+    bboxes_annotation = terminal.bboxes_body
+    segmentations_annotation = terminal.segmentations_body
+    if bboxes_annotation is None or segmentations_annotation is None:
+        raise AssertionError("annotation presence was checked above")
+
     bboxes = _detection_entries(
-        terminal.bboxes_body,
+        bboxes_annotation,
         "bboxes_body",
         context,
         errors,
     )
     segmentations = _detection_entries(
-        terminal.segmentations_body,
+        segmentations_annotation,
         "segmentations_body",
         context,
         errors,
@@ -259,7 +282,7 @@ def _duplicate_path_errors(records: Sequence[TerminalRecord]) -> list[str]:
     errors: list[str] = []
     for record in records:
         try:
-            canonical_path = record.filepath.resolve()
+            canonical_path = record.filepath.resolve(strict=record.filepath.is_symlink())
         except (OSError, RuntimeError, ValueError) as exc:
             errors.append(f"{record.relative_filepath}: could not resolve canonical path {record.filepath}: {exc}")
         else:
@@ -275,7 +298,7 @@ def _path_diagnostics(
     grouped: dict[Path, int] = {}
     for record in records:
         try:
-            canonical_path = record.filepath.resolve()
+            canonical_path = record.filepath.resolve(strict=record.filepath.is_symlink())
         except (OSError, RuntimeError, ValueError):
             continue
         grouped[canonical_path] = grouped.get(canonical_path, 0) + 1
