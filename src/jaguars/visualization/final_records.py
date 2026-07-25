@@ -23,6 +23,15 @@ class TerminalRecord:
     bboxes_body: FrozenAnnotation
     segmentations_body: FrozenAnnotation
 
+    def __post_init__(self) -> None:
+        """Detach annotations from caller-owned mutable containers."""
+        object.__setattr__(self, "bboxes_body", _freeze_annotation(self.bboxes_body))
+        object.__setattr__(
+            self,
+            "segmentations_body",
+            _freeze_annotation(self.segmentations_body),
+        )
+
 
 def _source_id(sample: dict[str, Any]) -> str:
     raw_id = sample.get("_id")
@@ -38,7 +47,7 @@ def _source_id(sample: dict[str, Any]) -> str:
 def _annotation_container(
     sample: dict[str, Any],
     field: str,
-) -> FrozenAnnotation:
+) -> Mapping[str, Any]:
     container = sample.get(field)
     if not isinstance(container, dict):
         raise TerminalExportError(f"{field} must be an annotation object")
@@ -48,20 +57,24 @@ def _annotation_container(
         raise TerminalExportError(f"{field}.detections must be a nonempty list")
     if not all(isinstance(detection, dict) for detection in detections):
         raise TerminalExportError(f"{field}.detections entries must be objects")
-    frozen = _freeze_json(container)
-    if not isinstance(frozen, Mapping):
-        raise TerminalExportError(f"{field} must be an annotation object")
-    return frozen
+    return container
 
 
 def _freeze_json(value: Any) -> FrozenJsonValue:
     if value is None or isinstance(value, (str, int, float, bool)):
         return value
-    if isinstance(value, dict):
+    if isinstance(value, Mapping):
         return MappingProxyType({key: _freeze_json(nested) for key, nested in value.items()})
-    if isinstance(value, list):
+    if isinstance(value, (list, tuple)):
         return tuple(_freeze_json(nested) for nested in value)
     raise TerminalExportError(f"annotation contains unsupported value type: {type(value).__name__}")
+
+
+def _freeze_annotation(annotation: Mapping[str, Any]) -> FrozenAnnotation:
+    frozen = _freeze_json(annotation)
+    if not isinstance(frozen, Mapping):
+        raise TerminalExportError("annotation must be an object")
+    return frozen
 
 
 def _thaw_json(value: FrozenJsonValue) -> Any:

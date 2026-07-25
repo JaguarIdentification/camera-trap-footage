@@ -7,8 +7,10 @@ from typing import Any, cast
 import pytest
 
 from jaguars.visualization.final_records import (
+    FrozenAnnotation,
     FrozenJsonValue,
     TerminalExportError,
+    TerminalRecord,
     annotation_to_dict,
     load_terminal_records,
 )
@@ -86,6 +88,39 @@ def test_terminal_record_annotations_are_deeply_immutable(
         mutable_detection["label"] = "leopard"
     with pytest.raises(TypeError):
         mutable_bounding_box[0] = 0.5
+
+
+def test_direct_terminal_record_construction_freezes_annotation_aliases(
+    tmp_path: Path,
+) -> None:
+    annotations: dict[str, Any] = {
+        "detections": [
+            {
+                "label": "jaguar",
+                "bounding_box": [0.1, 0.2, 0.3, 0.4],
+            }
+        ]
+    }
+    record = TerminalRecord(
+        source_id="source",
+        filepath=tmp_path / "image.jpg",
+        relative_filepath="data/image.jpg",
+        jaguar_id="F11",
+        bboxes_body=cast(FrozenAnnotation, annotations),
+        segmentations_body=cast(FrozenAnnotation, annotations),
+    )
+
+    annotations["detections"][0]["label"] = "leopard"
+    annotations["detections"].append({"label": "another"})
+
+    detections = cast(
+        tuple[Mapping[str, FrozenJsonValue], ...],
+        record.bboxes_body["detections"],
+    )
+    assert len(detections) == 1
+    assert detections[0]["label"] == "jaguar"
+    with pytest.raises(TypeError):
+        cast(MutableMapping[str, FrozenJsonValue], detections[0])["label"] = "puma"
 
 
 def test_annotation_to_dict_returns_independent_mutable_data(
