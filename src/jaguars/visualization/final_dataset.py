@@ -56,6 +56,7 @@ DEFAULT_PLUGINS_DIR = DEFAULT_STATE_ROOT / "plugins"
 DEFAULT_MOUNT_ROOTS = (Path("/Volumes/Extreme SSD"), Path("/Volumes/CameraTrapPython"))
 DEFAULT_ADDRESS = "localhost"
 DEFAULT_PORT = 5151
+APPROVED_DATABASE_NAME = "fiftyone"
 EXPECTED_SAMPLE_COUNT = 1367
 EXPECTED_TERMINAL_IDENTITY_POPULATED = 1120
 EXPECTED_TERMINAL_IDENTITY_NULL = 247
@@ -213,7 +214,7 @@ class RunReport:
             media_status = (
                 "failed"
                 if validation.media_failed or validation.duplicate_path_groups
-                else "passed" if audit.validation_state == "complete" else "not_completed"
+                else ("passed" if audit.validation_state == "complete" or validation.unique_paths is not None else "not_completed")
             )
         path_values = {} if paths is None else _report_paths(paths)
         return cls(
@@ -362,6 +363,7 @@ class Services:
     write_report: Callable[[RunReport, Path], Path]
     now: Callable[[], datetime]
     input_fn: Callable[[str], str]
+    isatty: Callable[[], bool]
     output_fn: Callable[[str], None]
 
 
@@ -425,6 +427,7 @@ def configure_fiftyone_environment(paths: RuntimePaths) -> None:
     for unsafe_key in (
         "FIFTYONE_DATABASE_URI",
         "FIFTYONE_PRIVATE_DATABASE_PORT",
+        "FIFTYONE_DATABASE_NAME",
     ):
         if os.environ.get(unsafe_key):
             raise StorageSafetyError(f"{unsafe_key} must be unset before configuring FiftyOne")
@@ -438,6 +441,9 @@ def configure_fiftyone_environment(paths: RuntimePaths) -> None:
             raise StorageSafetyError(f"FiftyOne config file must contain an object: {paths.config_path}")
         if config_payload.get("database_uri"):
             raise StorageSafetyError(f"FiftyOne config file database_uri must be unset: {paths.config_path}")
+        configured_database_name = config_payload.get("database_name")
+        if configured_database_name not in (None, APPROVED_DATABASE_NAME):
+            raise StorageSafetyError(f"FiftyOne config file database_name must be {APPROVED_DATABASE_NAME!r}: {paths.config_path}")
         configured_database_dir = config_payload.get("database_dir")
         if configured_database_dir is not None:
             if not isinstance(configured_database_dir, str):
@@ -449,6 +455,7 @@ def configure_fiftyone_environment(paths: RuntimePaths) -> None:
 
     os.environ["FIFTYONE_CONFIG_PATH"] = str(paths.config_path)
     os.environ["FIFTYONE_DATABASE_DIR"] = str(paths.database_dir)
+    os.environ["FIFTYONE_DATABASE_NAME"] = APPROVED_DATABASE_NAME
     os.environ["FIFTYONE_DATASET_ZOO_DIR"] = str(paths.dataset_dir)
     os.environ["FIFTYONE_DEFAULT_DATASET_DIR"] = str(paths.dataset_dir)
     os.environ["FIFTYONE_MODEL_ZOO_DIR"] = str(paths.model_zoo_dir)
@@ -466,6 +473,9 @@ def validate_imported_fiftyone_configuration(
     private_port = os.environ.get("FIFTYONE_PRIVATE_DATABASE_PORT")
     if private_port:
         raise StorageSafetyError(f"FIFTYONE_PRIVATE_DATABASE_PORT must be unset, found {private_port!r}")
+    database_name = getattr(fiftyone.config, "database_name", APPROVED_DATABASE_NAME)
+    if database_name != APPROVED_DATABASE_NAME:
+        raise StorageSafetyError(f"FiftyOne database_name must be {APPROVED_DATABASE_NAME!r}, found {database_name!r}")
 
     configured_database_dir = getattr(fiftyone.config, "database_dir", None)
     if not isinstance(configured_database_dir, (str, os.PathLike)):
@@ -815,6 +825,7 @@ DEFAULT_SERVICES = Services(
     write_report=write_report,
     now=_utc_now,
     input_fn=lambda prompt: input(prompt),
+    isatty=lambda: sys.stdin.isatty(),
     output_fn=print,
 )
 
@@ -917,7 +928,7 @@ def run(
                 active_services.output_fn(f"Existing dataset samples: {existing_count}")
                 active_services.output_fn(f"Proposed dataset samples: {len(audit.records)}")
                 confirmed = True
-            else:
+            elif active_services.isatty():
                 confirmed = confirm_overwrite(
                     args.dataset_name,
                     existing_count,
@@ -925,6 +936,8 @@ def run(
                     input_fn=active_services.input_fn,
                     output_fn=active_services.output_fn,
                 )
+            else:
+                confirmed = False
             if not confirmed:
                 raise OverwriteDeclinedError(f"overwrite declined for dataset: {args.dataset_name}")
 
@@ -932,13 +945,37 @@ def run(
             "snapshot_creation",
             last_successful_phase="validation",
         )
-        dataset = active_services.create_snapshot(
-            audit.records,
-            args.dataset_name,
-            f"{args.dataset_name}__building",
-            exists and args.overwrite,
-            expected_original_id,
-        )
+        try:
+            dataset = active_services.create_snapshot(
+                audit.records,
+                args.dataset_name,
+                f"{args.dataset_name}__building",
+                exists and args.overwrite,
+                expected_original_id,
+            )
+        except BaseException as creation_error:
+            published_dataset = getattr(creation_error, "published_dataset", None)
+            if published_dataset is not None:
+                summary = active_services.verify_snapshot(
+                    published_dataset,
+                    audit.records,
+                )
+                report = report.at_phase(
+                    "cleanup_failed",
+                    last_successful_phase="snapshot_created",
+                )
+                report = replace(
+                    report,
+                    counts=MappingProxyType(
+                        {
+                            **report.counts,
+                            "constructed": summary.constructed_count,
+                        }
+                    ),
+                    field_population=MappingProxyType(dict(summary.field_population)),
+                    views=MappingProxyType({"status": "created", "names": list(summary.saved_views)}),
+                )
+            raise
         summary = active_services.verify_snapshot(dataset, audit.records)
         report = report.at_phase(
             "snapshot_created",

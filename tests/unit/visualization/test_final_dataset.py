@@ -49,6 +49,18 @@ from jaguars.visualization.final_validation import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _clear_inherited_fiftyone_database_overrides(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for key in (
+        "FIFTYONE_DATABASE_URI",
+        "FIFTYONE_PRIVATE_DATABASE_PORT",
+        "FIFTYONE_DATABASE_NAME",
+    ):
+        monkeypatch.delenv(key, raising=False)
+
+
 def test_cli_and_runtime_defaults_are_the_approved_final_snapshot_values() -> None:
     args = parse_args([])
     paths = default_runtime_paths()
@@ -146,6 +158,7 @@ def test_fiftyone_paths_are_configured_before_any_lazy_import(tmp_path: Path) ->
     [
         "FIFTYONE_DATABASE_URI",
         "FIFTYONE_PRIVATE_DATABASE_PORT",
+        "FIFTYONE_DATABASE_NAME",
     ],
 )
 def test_fiftyone_configuration_rejects_inherited_external_connection_environment(
@@ -165,6 +178,7 @@ def test_fiftyone_configuration_rejects_inherited_external_connection_environmen
     [
         ({"database_uri": "mongodb://foreign.example:27017"}, "database_uri"),
         ({"database_dir": "/tmp/foreign-fiftyone"}, "database_dir"),
+        ({"database_name": "foreign"}, "database_name"),
     ],
 )
 def test_fiftyone_configuration_rejects_external_connection_state_in_config_file(
@@ -181,11 +195,12 @@ def test_fiftyone_configuration_rejects_external_connection_state_in_config_file
 
 
 @pytest.mark.parametrize(
-    ("database_uri", "private_port", "database_dir", "expected_message"),
+    ("database_uri", "private_port", "database_dir", "database_name", "expected_message"),
     [
-        ("mongodb://foreign.example:27017", None, None, "database_uri"),
-        (None, "27018", None, "FIFTYONE_PRIVATE_DATABASE_PORT"),
-        (None, None, "/tmp/foreign-fiftyone", "database_dir"),
+        ("mongodb://foreign.example:27017", None, None, "fiftyone", "database_uri"),
+        (None, "27018", None, "fiftyone", "FIFTYONE_PRIVATE_DATABASE_PORT"),
+        (None, None, "/tmp/foreign-fiftyone", "fiftyone", "database_dir"),
+        (None, None, None, "foreign", "database_name"),
     ],
 )
 def test_post_import_fiftyone_configuration_must_match_approved_database(
@@ -194,6 +209,7 @@ def test_post_import_fiftyone_configuration_must_match_approved_database(
     database_uri: str | None,
     private_port: str | None,
     database_dir: str | None,
+    database_name: str,
     expected_message: str,
 ) -> None:
     paths = _runtime_paths(tmp_path)
@@ -204,6 +220,7 @@ def test_post_import_fiftyone_configuration_must_match_approved_database(
         config=SimpleNamespace(
             database_uri=database_uri,
             database_dir=database_dir or str(paths.database_dir),
+            database_name=database_name,
         )
     )
 
@@ -289,6 +306,7 @@ def _services(
         write_report=lambda report, report_dir: reports.append(report) or report_dir / "run.json",
         now=lambda: datetime(2026, 7, 25, 12, 0, tzinfo=timezone.utc),
         input_fn=lambda prompt: input_answer,
+        isatty=lambda: True,
         output_fn=lambda message: events.append(f"print:{message}"),
     )
 
@@ -473,6 +491,29 @@ def test_yes_overwrite_is_noninteractive_but_still_prints_counts(tmp_path: Path)
     assert "print:Existing dataset samples: 1200" in events
     assert "print:Proposed dataset samples: 1" in events
     assert "create:replace:original-dataset-id" in events
+
+
+def test_non_tty_overwrite_requires_yes_even_if_input_would_match(tmp_path: Path) -> None:
+    events: list[str] = []
+    reports: list[RunReport] = []
+    audit = Audit(records=(_record(tmp_path),), terminal_count=1, lineage_candidate_count=6)
+    services = _services(
+        events=events,
+        reports=reports,
+        audit=audit,
+        existing=True,
+        input_answer=DEFAULT_DATASET_NAME,
+    )
+    services = Services(**{**services.__dict__, "isatty": lambda: False})
+
+    with pytest.raises(OverwriteDeclinedError):
+        run(
+            parse_args(["--create-only", "--overwrite"]),
+            services=services,
+            paths=_runtime_paths(tmp_path),
+        )
+
+    assert not any(event.startswith("create:") for event in events)
 
 
 def test_build_validated_records_honors_exact_configured_lineage_paths(
@@ -682,6 +723,29 @@ def test_report_separates_frozen_terminal_and_resolved_identity_counts(
     assert report.counts["resolved_identity_null"] == 1
 
 
+def test_media_report_passes_when_all_media_was_read_despite_other_failures(
+    tmp_path: Path,
+) -> None:
+    report = RunReport.from_audit(
+        Audit(
+            records=(_record(tmp_path),),
+            terminal_count=1,
+            lineage_candidate_count=0,
+            validation=AuditValidation(
+                annotation_failed=1,
+                duplicate_hash_groups=1,
+                duplicate_hash_pairs=1,
+                unique_paths=1,
+                unique_sha256=1,
+            ),
+            validation_state="failed",
+        )
+    )
+
+    assert report.media_validation["status"] == "passed"
+    assert report.hash_validation["status"] == "failed"
+
+
 def test_audit_failure_report_retains_partial_counts_and_failed_validation_state(
     tmp_path: Path,
 ) -> None:
@@ -817,6 +881,40 @@ def test_snapshot_failure_report_marks_snapshot_creation_phase(tmp_path: Path) -
     assert failure.phase == "snapshot_creation"
     assert failure.last_successful_phase == "validation"
     assert failure.views["status"] == "not_requested"
+
+
+def test_published_cleanup_failure_report_retains_snapshot_summary(tmp_path: Path) -> None:
+    events: list[str] = []
+    reports: list[RunReport] = []
+    audit = Audit(records=(_record(tmp_path),), terminal_count=1, lineage_candidate_count=6)
+    services = _services(events=events, reports=reports, audit=audit, existing=True)
+    published = [object()]
+
+    class CleanupFailure(RuntimeError):
+        published_dataset = published
+
+    services = Services(
+        **{
+            **services.__dict__,
+            "create_snapshot": lambda *args: (_ for _ in ()).throw(CleanupFailure("old backup remains")),
+        }
+    )
+
+    with pytest.raises(CleanupFailure):
+        run(
+            parse_args(["--create-only", "--overwrite", "--yes"]),
+            services=services,
+            paths=_runtime_paths(tmp_path),
+        )
+
+    failure = reports[-1]
+    assert failure.phase == "cleanup_failed"
+    assert failure.last_successful_phase == "snapshot_created"
+    assert failure.counts["constructed"] == 1
+    assert failure.views == {
+        "status": "created",
+        "names": ["All final samples"],
+    }
 
 
 def test_launch_failure_report_retains_verified_snapshot_summary(

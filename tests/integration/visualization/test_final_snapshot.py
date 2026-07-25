@@ -1159,6 +1159,53 @@ def test_replacement_rechecks_loaded_original_identity_before_rename(
     fo.delete_dataset(displaced_name)
 
 
+def test_query_failure_immediately_after_old_rename_restores_final(
+    tmp_path: Path,
+    dataset_names: tuple[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    final_name, temporary_name = dataset_names
+    original, _, _ = _existing_snapshot(tmp_path, final_name)
+    original_id = original._doc.id
+    real_query_by_id = final_snapshot._database_document_by_id
+    failures = 0
+
+    def fail_post_rename_query(dataset_id: object) -> dict[str, object] | None:
+        nonlocal failures
+        document = real_query_by_id(dataset_id)
+        if (
+            dataset_id == original_id
+            and document is not None
+            and str(document.get("name", "")).startswith(f"{temporary_name}--backup-")
+            and failures < 2
+        ):
+            failures += 1
+            raise RuntimeError("post-rename query unavailable")
+        return document
+
+    monkeypatch.setattr(
+        final_snapshot,
+        "_database_document_by_id",
+        fail_post_rename_query,
+    )
+
+    with pytest.raises(RuntimeError, match="post-rename query unavailable"):
+        _create_snapshot(
+            [_validated_record(tmp_path)],
+            final_name,
+            temporary_name,
+            replace_existing=True,
+            expected_original_id=original_id,
+        )
+
+    restored = fo.load_dataset(final_name)
+    assert restored._doc.id == original_id
+    assert restored.info["generation"] == "old"
+    assert _database_names_with_prefix(f"{temporary_name}--") == []
+
+    fo.delete_dataset(final_name)
+
+
 def test_transactional_replacement_rollback_failure_keeps_owned_backup(
     tmp_path: Path,
     dataset_names: tuple[str, str],

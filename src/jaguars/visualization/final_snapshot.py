@@ -105,6 +105,14 @@ class SnapshotReplacementError(SnapshotError):
     """Raised when transactional replacement cannot safely complete."""
 
 
+class PublishedSnapshotCleanupError(SnapshotReplacementError):
+    """Raised when publication succeeded but retirement of the old backup failed."""
+
+    def __init__(self, message: str, dataset: fo.Dataset) -> None:
+        super().__init__(message)
+        self.published_dataset = dataset
+
+
 @dataclass(frozen=True)
 class _OwnedDataset:
     dataset_id: Any
@@ -385,6 +393,20 @@ def _database_document_by_id(dataset_id: Any) -> dict[str, Any] | None:
     )
 
 
+def _query_document_by_id_with_retry(dataset_id: Any) -> dict[str, Any] | None:
+    try:
+        return _database_document_by_id(dataset_id)
+    except BaseException:
+        return _database_document_by_id(dataset_id)
+
+
+def _query_document_by_name_with_retry(name: str) -> dict[str, Any] | None:
+    try:
+        return _database_document_by_name(name)
+    except BaseException:
+        return _database_document_by_name(name)
+
+
 def _document_name(document: dict[str, Any] | None) -> str | None:
     if document is None:
         return None
@@ -482,9 +504,9 @@ def _restore_original(
     backup_name: str,
     promotion_error: BaseException,
 ) -> None:
-    original_document = _database_document_by_id(original_id)
+    original_document = _query_document_by_id_with_retry(original_id)
     original_name = _document_name(original_document)
-    final_document = _database_document_by_name(dataset_name)
+    final_document = _query_document_by_name_with_retry(dataset_name)
 
     if original_name == dataset_name and final_document is not None and final_document.get("_id") == original_id:
         return
@@ -499,16 +521,16 @@ def _restore_original(
     try:
         _rename_dataset(original, dataset_name)
     except BaseException as rollback_error:
-        restored_document = _database_document_by_id(original_id)
-        restored_final = _database_document_by_name(dataset_name)
+        restored_document = _query_document_by_id_with_retry(original_id)
+        restored_final = _query_document_by_name_with_retry(dataset_name)
         if _document_name(restored_document) == dataset_name and restored_final is not None and restored_final.get("_id") == original_id:
             return
         raise SnapshotReplacementError(
             f"replacement promotion failed and rollback failed; " f"old dataset remains at {_document_name(restored_document)!r}: {rollback_error}"
         ) from promotion_error
 
-    restored_document = _database_document_by_id(original_id)
-    restored_final = _database_document_by_name(dataset_name)
+    restored_document = _query_document_by_id_with_retry(original_id)
+    restored_final = _query_document_by_name_with_retry(dataset_name)
     if _document_name(restored_document) != dataset_name or restored_final is None or restored_final.get("_id") != original_id:
         raise SnapshotReplacementError(
             f"rollback did not restore the old dataset; " f"it remains at {_document_name(restored_document)!r}"
@@ -549,7 +571,7 @@ def _recover_promotion_failure(
     promotion_error: BaseException,
 ) -> None:
     try:
-        final_document = _database_document_by_name(dataset_name)
+        final_document = _query_document_by_name_with_retry(dataset_name)
     except BaseException as query_error:
         raise SnapshotReplacementError(
             f"promotion recovery could not query final state; old dataset remains "
@@ -620,10 +642,7 @@ def _delete_owned_for_recovery(
 def _query_published_document_with_retry(
     dataset_name: str,
 ) -> dict[str, Any] | None:
-    try:
-        return _database_document_by_name(dataset_name)
-    except BaseException:
-        return _database_document_by_name(dataset_name)
+    return _query_document_by_name_with_retry(dataset_name)
 
 
 def _promote_replacement(
@@ -659,7 +678,20 @@ def _promote_replacement(
         )
         raise
 
-    renamed_original = _database_document_by_id(original_id)
+    transaction.phase = _SnapshotPhase.PROMOTION_ATTEMPTED
+    try:
+        renamed_original = _query_document_by_id_with_retry(original_id)
+    except BaseException as query_error:
+        _recover_promotion_failure(
+            staged,
+            ownership,
+            original,
+            original_id,
+            dataset_name,
+            backup_name,
+            query_error,
+        )
+        raise
     if _document_name(renamed_original) != backup_name:
         state_error = SnapshotReplacementError("old dataset rename did not persist")
         _recover_backup_rename_failure(
@@ -671,7 +703,6 @@ def _promote_replacement(
         )
         raise state_error
 
-    transaction.phase = _SnapshotPhase.PROMOTION_ATTEMPTED
     try:
         _rename_dataset(staged, dataset_name)
     except BaseException as promotion_error:
@@ -807,7 +838,13 @@ def create_snapshot(
                 transaction,
             )
             transaction.phase = _SnapshotPhase.PUBLISHED
-            _delete_replaced_backup(replacement)
+            try:
+                _delete_replaced_backup(replacement)
+            except BaseException as cleanup_error:
+                raise PublishedSnapshotCleanupError(
+                    str(cleanup_error),
+                    dataset,
+                ) from cleanup_error
             dataset._doc.reload()
             return dataset
         _rename_dataset(dataset, dataset_name)

@@ -496,17 +496,17 @@ Run:
 uv run python -m jaguars.visualization.final_dataset --dry-run
 ```
 
-Expected: exit 0; report shows exactly 1,367 terminal samples, 1,367 unique readable paths, 1,367 unique hashes, valid identities/annotations, and lineage totals summing to 1,367. If the unique-hash requirement fails, stop and report the duplicate files; do not weaken the approved invariant.
+Current expected result: exit 2. The read-only audit reports 1,367 terminal samples and readable paths, but creation is blocked by 15 annotation-invalid samples and 39 duplicate-hash pairs (1,328 unique hashes). Do not create or launch until those blockers are corrected or the integrity policy is explicitly revised.
 
 - [ ] **Step 2: Inspect the dry-run report**
 
 Run:
 
 ```bash
-jq '{counts, lineage, validation, paths}' /Volumes/CameraTrapPython/fiftyone/JaguarCameraTrap_Final_Curated_v1/latest.json
+jq '{status, phase, last_successful_phase, counts, lineage, hash_validation, media_validation, failure, paths}' /Volumes/CameraTrapPython/fiftyone/JaguarCameraTrap_Final_Curated_v1/latest.json
 ```
 
-Expected: no validation errors, approved resolved storage paths, and complete lineage accounting.
+Expected: `status` is `failed`, `phase` is `validation`, media validation passed, hash validation failed with 39 duplicate pairs, annotation failures equal 15, approved paths are resolved, and lineage accounting is complete.
 
 - [ ] **Step 3: Create without launching**
 
@@ -516,7 +516,7 @@ Run:
 uv run python -m jaguars.visualization.final_dataset --create-only
 ```
 
-Expected: exit 0 and persistent dataset `JaguarCameraTrap_Final_Curated_v1` created atomically. If the name already exists, stop rather than overwriting unless the user separately authorizes the approved overwrite flow.
+Blocked: do not run this step while the dry-run exits 2. After the data blockers are resolved or policy is revised, expect exit 0 and atomic creation. If the name already exists, stop rather than overwriting unless the user separately authorizes the approved overwrite flow.
 
 - [ ] **Step 4: Verify the production snapshot**
 
@@ -526,7 +526,7 @@ Run:
 uv run python -m jaguars.visualization.final_dataset --launch-only --port 5151
 ```
 
-Expected: FiftyOne launches with 1,367 samples and the eight saved views. Verify `http://localhost:5151` responds, then interrupt once and confirm clean App shutdown without dataset deletion.
+Blocked until a production snapshot has passed creation and verification. Only then launch and verify 1,367 samples and the eight saved views.
 
 - [ ] **Step 5: Review the final diff and status**
 
