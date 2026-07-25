@@ -1,7 +1,13 @@
 import json
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any
+
+JsonScalar = str | int | float | bool | None
+FrozenJsonValue = JsonScalar | Mapping[str, "FrozenJsonValue"] | tuple["FrozenJsonValue", ...]
+FrozenAnnotation = Mapping[str, FrozenJsonValue]
 
 
 class TerminalExportError(ValueError):
@@ -14,8 +20,8 @@ class TerminalRecord:
     filepath: Path
     relative_filepath: str
     jaguar_id: str
-    bboxes_body: dict[str, Any]
-    segmentations_body: dict[str, Any]
+    bboxes_body: FrozenAnnotation
+    segmentations_body: FrozenAnnotation
 
 
 def _source_id(sample: dict[str, Any]) -> str:
@@ -32,7 +38,7 @@ def _source_id(sample: dict[str, Any]) -> str:
 def _annotation_container(
     sample: dict[str, Any],
     field: str,
-) -> dict[str, Any]:
+) -> FrozenAnnotation:
     container = sample.get(field)
     if not isinstance(container, dict):
         raise TerminalExportError(f"{field} must be an annotation object")
@@ -42,22 +48,49 @@ def _annotation_container(
         raise TerminalExportError(f"{field}.detections must be a nonempty list")
     if not all(isinstance(detection, dict) for detection in detections):
         raise TerminalExportError(f"{field}.detections entries must be objects")
-    return container
+    frozen = _freeze_json(container)
+    if not isinstance(frozen, Mapping):
+        raise TerminalExportError(f"{field} must be an annotation object")
+    return frozen
+
+
+def _freeze_json(value: Any) -> FrozenJsonValue:
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, dict):
+        return MappingProxyType({key: _freeze_json(nested) for key, nested in value.items()})
+    if isinstance(value, list):
+        return tuple(_freeze_json(nested) for nested in value)
+    raise TerminalExportError(f"annotation contains unsupported value type: {type(value).__name__}")
+
+
+def _thaw_json(value: FrozenJsonValue) -> Any:
+    if isinstance(value, Mapping):
+        return {key: _thaw_json(nested) for key, nested in value.items()}
+    if isinstance(value, tuple):
+        return [_thaw_json(nested) for nested in value]
+    return value
+
+
+def annotation_to_dict(annotation: FrozenAnnotation) -> dict[str, Any]:
+    """Return an independent, mutable dictionary for a frozen annotation."""
+    return {key: _thaw_json(value) for key, value in annotation.items()}
 
 
 def _media_path(export_dir: Path, raw_filepath: object) -> tuple[Path, str]:
     if not isinstance(raw_filepath, str) or not raw_filepath.strip():
         raise TerminalExportError("filepath must be a nonempty string")
 
-    export_root = export_dir.resolve()
-    supplied_path = Path(raw_filepath)
-    candidate = supplied_path if supplied_path.is_absolute() else export_root / supplied_path
-    resolved_path = candidate.resolve()
+    try:
+        export_root = export_dir.resolve()
+        supplied_path = Path(raw_filepath)
+        candidate = supplied_path if supplied_path.is_absolute() else export_root / supplied_path
+        resolved_path = candidate.resolve()
+    except (OSError, ValueError) as exc:
+        raise TerminalExportError(f"invalid filepath {raw_filepath!r}: {exc}") from exc
 
     if resolved_path == export_root or not resolved_path.is_relative_to(export_root):
-        raise TerminalExportError(
-            f"filepath must resolve below export directory: {raw_filepath}"
-        )
+        raise TerminalExportError(f"filepath must resolve below export directory: {raw_filepath}")
 
     relative_filepath = resolved_path.relative_to(export_root).as_posix()
     return resolved_path, relative_filepath
@@ -90,14 +123,11 @@ def load_terminal_records(export_dir: Path) -> list[TerminalRecord]:
     samples_path = export_dir / "samples.json"
     try:
         payload = json.loads(samples_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise TerminalExportError(f"could not read {samples_path}: {exc}") from exc
 
     if not isinstance(payload, dict) or not isinstance(payload.get("samples"), list):
         raise TerminalExportError("samples.json must contain a samples list")
 
-    records = [
-        _parse_terminal_sample(export_dir, sample)
-        for sample in payload["samples"]
-    ]
+    records = [_parse_terminal_sample(export_dir, sample) for sample in payload["samples"]]
     return sorted(records, key=lambda record: record.relative_filepath)

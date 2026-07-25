@@ -49,4 +49,3 @@ def terminal_export(tmp_path: Path) -> Path:
         encoding="utf-8",
     )
     return export_dir
-
