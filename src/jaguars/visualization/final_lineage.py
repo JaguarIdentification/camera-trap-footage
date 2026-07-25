@@ -21,6 +21,22 @@ MatchMethod = Literal[
 CandidateType = Literal["export", "manifest", "provided"]
 
 
+class LineageLoadError(ValueError):
+    """Raised with candidates accumulated before one approved source failed."""
+
+    def __init__(
+        self,
+        stage: str,
+        path: Path,
+        candidates: tuple["LineageCandidate", ...],
+        cause: BaseException,
+    ) -> None:
+        super().__init__(f"{stage} lineage load failed at {path}: {cause}")
+        self.stage = stage
+        self.path = path
+        self.candidates = candidates
+
+
 @dataclass(frozen=True)
 class LineageCandidate:
     candidate_type: CandidateType = "provided"
@@ -493,9 +509,28 @@ def load_lineage_candidates_from_paths(
     manifest_paths: Iterable[Path],
 ) -> tuple[LineageCandidate, ...]:
     """Load lineage only from the caller-approved export and manifest paths."""
-    export_candidates = (candidate for export_dir in export_dirs for candidate in load_export_candidates(export_dir))
-    manifest_candidates = (candidate for manifest_path in manifest_paths for candidate in load_manifest_candidates(manifest_path))
-    return tuple((*export_candidates, *manifest_candidates))
+    candidates: list[LineageCandidate] = []
+    for export_dir in export_dirs:
+        try:
+            candidates.extend(load_export_candidates(export_dir))
+        except Exception as error:
+            raise LineageLoadError(
+                "export",
+                export_dir,
+                tuple(candidates),
+                error,
+            ) from error
+    for manifest_path in manifest_paths:
+        try:
+            candidates.extend(load_manifest_candidates(manifest_path))
+        except Exception as error:
+            raise LineageLoadError(
+                "manifest",
+                manifest_path,
+                tuple(candidates),
+                error,
+            ) from error
+    return tuple(candidates)
 
 
 def load_lineage_candidates(intermediate_dir: Path) -> tuple[LineageCandidate, ...]:

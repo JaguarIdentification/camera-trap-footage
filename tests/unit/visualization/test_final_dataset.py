@@ -373,8 +373,8 @@ def test_default_mode_audits_creates_reports_then_launches(tmp_path: Path) -> No
         "exists",
         "create:new:None",
         "verify",
-        "report",
         "launch",
+        "report",
     ]
 
 
@@ -538,6 +538,8 @@ def test_build_validated_records_honors_exact_configured_lineage_paths(
             unique_paths=1,
             unique_sha256=1,
         ),
+        lineage_status_counts=MappingProxyType({"matched": 1}),
+        lineage_method_counts=MappingProxyType({"source_id": 1}),
     )
     assert events == [
         ("terminal", paths.terminal_export_dir),
@@ -703,6 +705,10 @@ def test_audit_failure_report_retains_partial_counts_and_failed_validation_state
             unique_sha256=1,
             errors=("malformed bbox", "missing media", "duplicate hash"),
         ),
+        phase="validation",
+        last_successful_phase="lineage_load",
+        lineage_state="complete",
+        validation_state="failed",
     )
     services = _services(
         events=events,
@@ -737,6 +743,80 @@ def test_audit_failure_report_retains_partial_counts_and_failed_validation_state
         "duplicate_pairs": 1,
     }
     assert failure.media_validation["status"] == "failed"
+    assert failure.phase == "validation"
+    assert failure.last_successful_phase == "lineage_load"
+    assert failure.lineage["status"] == "complete"
+
+
+def test_terminal_parse_failure_reports_no_started_lineage_or_validation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from jaguars.visualization import final_dataset
+
+    monkeypatch.setattr(
+        final_dataset,
+        "load_terminal_records",
+        lambda export_dir: (_ for _ in ()).throw(ValueError("broken terminal export")),
+    )
+
+    with pytest.raises(AuditError) as caught:
+        build_validated_records(_runtime_paths(tmp_path))
+
+    report = RunReport.from_audit(caught.value.audit).failed(caught.value)
+    assert report.phase == "terminal_parse"
+    assert report.last_successful_phase == "startup"
+    assert report.lineage["status"] == "not_started"
+    assert report.hash_validation["status"] == "not_completed"
+    assert report.media_validation["status"] == "not_completed"
+
+
+def test_lineage_loader_failure_reports_parsed_terminal_counts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from jaguars.visualization import final_dataset
+
+    terminal = _record(tmp_path).terminal
+    monkeypatch.setattr(final_dataset, "load_terminal_records", lambda export_dir: [terminal])
+    monkeypatch.setattr(
+        final_dataset,
+        "load_lineage_candidates_from_paths",
+        lambda export_dirs, manifest_paths: (_ for _ in ()).throw(ValueError("broken lineage export")),
+    )
+
+    with pytest.raises(AuditError) as caught:
+        build_validated_records(_runtime_paths(tmp_path))
+
+    report = RunReport.from_audit(caught.value.audit).failed(caught.value)
+    assert report.phase == "lineage_load"
+    assert report.last_successful_phase == "terminal_parse"
+    assert report.counts["terminal"] == 1
+    assert report.counts["terminal_identity_populated"] == 1
+    assert report.lineage["status"] == "failed"
+    assert report.hash_validation["status"] == "not_completed"
+    assert report.media_validation["status"] == "not_completed"
+
+
+def test_snapshot_failure_report_marks_snapshot_creation_phase(tmp_path: Path) -> None:
+    events: list[str] = []
+    reports: list[RunReport] = []
+    audit = Audit(records=(_record(tmp_path),), terminal_count=1, lineage_candidate_count=6)
+    services = _services(events=events, reports=reports, audit=audit)
+    services = Services(
+        **{
+            **services.__dict__,
+            "create_snapshot": lambda *args: (_ for _ in ()).throw(RuntimeError("snapshot failed")),
+        }
+    )
+
+    with pytest.raises(RuntimeError, match="snapshot failed"):
+        run(parse_args(["--create-only"]), services=services, paths=_runtime_paths(tmp_path))
+
+    failure = reports[-1]
+    assert failure.phase == "snapshot_creation"
+    assert failure.last_successful_phase == "validation"
+    assert failure.views["status"] == "not_requested"
 
 
 def test_launch_failure_report_retains_verified_snapshot_summary(
@@ -767,6 +847,8 @@ def test_launch_failure_report_retains_verified_snapshot_summary(
         "status": "created",
         "names": ["All final samples"],
     }
+    assert failure.phase == "app_launch"
+    assert failure.last_successful_phase == "snapshot_created"
 
 
 def test_app_session_closes_after_wait_and_keyboard_interrupt() -> None:

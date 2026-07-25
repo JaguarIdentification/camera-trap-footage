@@ -17,6 +17,7 @@ from types import MappingProxyType
 from typing import Any, TypeVar, overload
 
 from jaguars.visualization.final_lineage import (
+    LineageLoadError,
     LineageIndex,
     load_lineage_candidates_from_paths,
 )
@@ -122,6 +123,12 @@ class Audit:
     resolved_identity_populated: int | None = None
     resolved_identity_null: int | None = None
     validation: AuditValidation = AuditValidation()
+    phase: str = "validation"
+    last_successful_phase: str | None = "validation"
+    lineage_state: str = "complete"
+    validation_state: str = "complete"
+    lineage_status_counts: Mapping[str, int] | None = None
+    lineage_method_counts: Mapping[str, int] | None = None
 
 
 class AuditError(IntegrityError):
@@ -146,6 +153,8 @@ class RunReport:
     dataset_name: str
     mode: str
     status: str
+    phase: str
+    last_successful_phase: str | None
     paths: Mapping[str, object]
     counts: Mapping[str, int | None]
     hash_validation: Mapping[str, object]
@@ -168,9 +177,11 @@ class RunReport:
     ) -> "RunReport":
         started = started_at or datetime.now(timezone.utc)
         finished = finished_at or started
-        lineage_status = "not_requested" if mode == "launch-only" else "complete"
-        status_counts = Counter(record.enrichment.status for record in audit.records)
-        method_counts = Counter(record.enrichment.match_method for record in audit.records if record.enrichment.match_method is not None)
+        lineage_status = "not_requested" if mode == "launch-only" else audit.lineage_state
+        status_counts = Counter(audit.lineage_status_counts or (record.enrichment.status for record in audit.records))
+        method_counts = Counter(
+            audit.lineage_method_counts or (record.enrichment.match_method for record in audit.records if record.enrichment.match_method is not None)
+        )
         validation = audit.validation
         hashes = {record.integrity.sha256 for record in audit.records}
         terminal_identity_populated = (
@@ -194,16 +205,25 @@ class RunReport:
         if mode == "launch-only":
             hash_status = "not_requested"
             media_status = "not_requested"
+        elif audit.validation_state == "not_started":
+            hash_status = "not_completed"
+            media_status = "not_completed"
         else:
             hash_status = "not_completed" if validation.media_failed else "failed" if validation.duplicate_hash_groups else "passed"
-            media_status = "failed" if validation.media_failed or validation.duplicate_path_groups else "passed"
+            media_status = (
+                "failed"
+                if validation.media_failed or validation.duplicate_path_groups
+                else "passed" if audit.validation_state == "complete" else "not_completed"
+            )
         path_values = {} if paths is None else _report_paths(paths)
         return cls(
             started_at=_utc_text(started),
             finished_at=_utc_text(finished),
             dataset_name=dataset_name,
             mode=mode,
-            status="completed",
+            status="in_progress",
+            phase=audit.phase,
+            last_successful_phase=audit.last_successful_phase,
             paths=MappingProxyType(path_values),
             counts=MappingProxyType(
                 {
@@ -275,10 +295,24 @@ class RunReport:
             self,
             finished_at=_utc_text(finished_at or datetime.now(timezone.utc)),
             status="completed",
+            phase="complete",
+            last_successful_phase="complete",
             counts=MappingProxyType(counts),
             field_population=MappingProxyType(fields),
             views=MappingProxyType(views),
             failure=None,
+        )
+
+    def at_phase(
+        self,
+        phase: str,
+        *,
+        last_successful_phase: str | None = None,
+    ) -> "RunReport":
+        return replace(
+            self,
+            phase=phase,
+            last_successful_phase=last_successful_phase,
         )
 
     def failed(
@@ -291,6 +325,7 @@ class RunReport:
             self,
             finished_at=_utc_text(finished_at or datetime.now(timezone.utc)),
             status="failed",
+            last_successful_phase=self.last_successful_phase,
             failure=MappingProxyType({"type": type(error).__name__, "message": str(error)}),
         )
 
@@ -301,6 +336,8 @@ class RunReport:
             "dataset_name": self.dataset_name,
             "mode": self.mode,
             "status": self.status,
+            "phase": self.phase,
+            "last_successful_phase": self.last_successful_phase,
             "paths": _plain(self.paths),
             "counts": _plain(self.counts),
             "hash_validation": _plain(self.hash_validation),
@@ -494,22 +531,59 @@ def build_validated_records(
     expected_terminal_identity_populated: int = EXPECTED_TERMINAL_IDENTITY_POPULATED,
     expected_terminal_identity_null: int = EXPECTED_TERMINAL_IDENTITY_NULL,
 ) -> Audit:
-    terminals = load_terminal_records(paths.terminal_export_dir)
-    candidates = load_lineage_candidates_from_paths(
-        paths.upstream_export_dirs,
-        paths.manifest_paths,
-    )
+    try:
+        terminals = load_terminal_records(paths.terminal_export_dir)
+    except Exception as error:
+        raise AuditError(
+            str(error),
+            Audit(
+                records=(),
+                terminal_count=0,
+                lineage_candidate_count=0,
+                phase="terminal_parse",
+                last_successful_phase="startup",
+                lineage_state="not_started",
+                validation_state="not_started",
+            ),
+        ) from error
     populated_identity_count = sum(terminal.jaguar_id is not None for terminal in terminals)
     null_identity_count = sum(terminal.jaguar_id is None for terminal in terminals)
+    try:
+        candidates = load_lineage_candidates_from_paths(
+            paths.upstream_export_dirs,
+            paths.manifest_paths,
+        )
+        index = LineageIndex.from_candidates(candidates)
+        enriched = [(terminal, index.enrich(terminal)) for terminal in terminals]
+    except Exception as error:
+        partial_candidate_count = len(error.candidates) if isinstance(error, LineageLoadError) else 0
+        raise AuditError(
+            str(error),
+            Audit(
+                records=(),
+                terminal_count=len(terminals),
+                lineage_candidate_count=partial_candidate_count,
+                terminal_identity_populated=populated_identity_count,
+                terminal_identity_null=null_identity_count,
+                phase="lineage_load",
+                last_successful_phase="terminal_parse",
+                lineage_state="failed",
+                validation_state="not_started",
+            ),
+        ) from error
     identity_errors = []
     if populated_identity_count != expected_terminal_identity_populated:
         identity_errors.append(f"expected {expected_terminal_identity_populated} populated terminal identities, found {populated_identity_count}")
     if null_identity_count != expected_terminal_identity_null:
         identity_errors.append(f"expected {expected_terminal_identity_null} null terminal identities, found {null_identity_count}")
-    index = LineageIndex.from_candidates(candidates)
+    lineage_status_counts = Counter(enrichment.status for _, enrichment in enriched)
+    lineage_method_counts = Counter(enrichment.match_method for _, enrichment in enriched if enrichment.match_method is not None)
+    resolved_identity_count = sum(
+        terminal.jaguar_id is not None or enrichment.fields.get("jaguar_id") is not None for terminal, enrichment in enriched
+    )
     try:
         records = validate_records(
-            [(terminal, index.enrich(terminal)) for terminal in terminals],
+            enriched,
             expected_count=expected_count,
         )
     except BatchValidationError as validation_error:
@@ -523,7 +597,7 @@ def build_validated_records(
             unique_sha256=len({record.integrity.sha256 for record in records}),
         )
 
-    resolved_identity_count = sum(record.resolved_jaguar_id is not None for record in records)
+    validation_state = "failed" if validation_errors else "complete"
     audit = Audit(
         records=tuple(records),
         terminal_count=len(terminals),
@@ -533,6 +607,12 @@ def build_validated_records(
         resolved_identity_populated=resolved_identity_count,
         resolved_identity_null=len(terminals) - resolved_identity_count,
         validation=validation,
+        phase="validation",
+        last_successful_phase="lineage_load" if validation_errors else "validation",
+        lineage_state="complete",
+        validation_state=validation_state,
+        lineage_status_counts=MappingProxyType({str(key): value for key, value in lineage_status_counts.items()}),
+        lineage_method_counts=MappingProxyType({str(key): value for key, value in lineage_method_counts.items()}),
     )
     errors = list(identity_errors)
     errors.extend(validation_errors)
@@ -777,7 +857,15 @@ def run(
     configured_paths = paths or default_runtime_paths()
     started_at = active_services.now()
     runtime_paths = configured_paths
-    audit = Audit(records=(), terminal_count=0, lineage_candidate_count=0)
+    audit = Audit(
+        records=(),
+        terminal_count=0,
+        lineage_candidate_count=0,
+        phase="startup",
+        last_successful_phase=None,
+        lineage_state="not_started",
+        validation_state="not_started",
+    )
     report: RunReport | None = None
     runtime_validated = False
     try:
@@ -793,9 +881,15 @@ def run(
                 mode=_mode(args),
                 started_at=started_at,
                 finished_at=active_services.now(),
+            ).at_phase(
+                "app_launch",
+                last_successful_phase="startup",
             )
-            active_services.write_report(report.completed(finished_at=active_services.now()), runtime_paths.report_dir)
             active_services.launch(dataset, args.address, args.port)
+            active_services.write_report(
+                report.completed(finished_at=active_services.now()),
+                runtime_paths.report_dir,
+            )
             return 0
 
         audit = active_services.audit(runtime_paths)
@@ -834,6 +928,10 @@ def run(
             if not confirmed:
                 raise OverwriteDeclinedError(f"overwrite declined for dataset: {args.dataset_name}")
 
+        report = report.at_phase(
+            "snapshot_creation",
+            last_successful_phase="validation",
+        )
         dataset = active_services.create_snapshot(
             audit.records,
             args.dataset_name,
@@ -842,10 +940,29 @@ def run(
             expected_original_id,
         )
         summary = active_services.verify_snapshot(dataset, audit.records)
-        report = report.completed(summary, finished_at=active_services.now())
-        active_services.write_report(report, runtime_paths.report_dir)
+        report = report.at_phase(
+            "snapshot_created",
+            last_successful_phase="snapshot_created",
+        )
+        report = replace(
+            report,
+            counts=MappingProxyType(
+                {
+                    **report.counts,
+                    "constructed": summary.constructed_count,
+                }
+            ),
+            field_population=MappingProxyType(dict(summary.field_population)),
+            views=MappingProxyType({"status": "created", "names": list(summary.saved_views)}),
+        )
         if not args.create_only:
+            report = report.at_phase(
+                "app_launch",
+                last_successful_phase="snapshot_created",
+            )
             active_services.launch(dataset, args.address, args.port)
+        report = report.completed(finished_at=active_services.now())
+        active_services.write_report(report, runtime_paths.report_dir)
         return 0
     except Exception as error:
         if isinstance(error, AuditError):

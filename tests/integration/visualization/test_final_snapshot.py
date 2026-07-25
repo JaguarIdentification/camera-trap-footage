@@ -1115,6 +1115,50 @@ def test_transactional_replacement_never_deletes_foreign_final_claimed_during_pr
     fo.delete_dataset(backup_names[0])
 
 
+def test_replacement_rechecks_loaded_original_identity_before_rename(
+    tmp_path: Path,
+    dataset_names: tuple[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    final_name, temporary_name = dataset_names
+    original, _, _ = _existing_snapshot(tmp_path, final_name)
+    original_id = original._doc.id
+    displaced_name = f"{temporary_name}--pinned-original"
+    real_load_dataset = fo.load_dataset
+    raced = False
+
+    def race_during_load(name: str, *args: object, **kwargs: object) -> fo.Dataset:
+        nonlocal raced
+        if name == final_name and kwargs.get("reload") is True and not raced:
+            raced = True
+            original.name = displaced_name
+            foreign = fo.Dataset(final_name, persistent=True)
+            foreign.info["owner"] = "foreign-load-racer"
+            foreign.save()
+        return real_load_dataset(name, *args, **kwargs)
+
+    monkeypatch.setattr(final_snapshot.fo, "load_dataset", race_during_load)
+
+    with pytest.raises(
+        SnapshotReplacementError,
+        match="changed while loading for promotion",
+    ):
+        _create_snapshot(
+            [_validated_record(tmp_path)],
+            final_name,
+            temporary_name,
+            replace_existing=True,
+            expected_original_id=original_id,
+        )
+
+    assert real_load_dataset(final_name).info["owner"] == "foreign-load-racer"
+    assert real_load_dataset(displaced_name).info["generation"] == "old"
+    assert _database_names_with_prefix(f"{temporary_name}--build-") == []
+
+    fo.delete_dataset(final_name)
+    fo.delete_dataset(displaced_name)
+
+
 def test_transactional_replacement_rollback_failure_keeps_owned_backup(
     tmp_path: Path,
     dataset_names: tuple[str, str],

@@ -641,6 +641,8 @@ def _promote_replacement(
         raise SnapshotReplacementError(f"confirmed final dataset changed before promotion: {dataset_name}")
     original_id = expected_original_id
     original = fo.load_dataset(dataset_name, reload=True)
+    if original._doc.id != expected_original_id:
+        raise SnapshotReplacementError(f"confirmed final dataset changed while loading for promotion: {dataset_name}")
     backup_name = _build_backup_name(temporary_name)
     if _database_document_by_name(backup_name) is not None:
         raise SnapshotCollisionError(f"replacement backup dataset already exists: {backup_name}")
