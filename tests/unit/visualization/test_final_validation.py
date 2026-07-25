@@ -343,6 +343,38 @@ def test_validate_records_aggregates_symlink_loop_resolution_and_media_errors(
     assert f"media is missing or unreadable: {missing_path}" in message
 
 
+def test_validate_records_aggregates_decompression_bomb_and_missing_media(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    image_path = tmp_path / "large.png"
+    Image.new("RGB", (8, 6)).save(image_path)
+    missing_path = tmp_path / "missing.png"
+    image = _terminal(
+        tmp_path,
+        filepath=image_path,
+        relative_filepath="data/large.png",
+    )
+    missing = _terminal(
+        tmp_path,
+        filepath=missing_path,
+        relative_filepath="data/missing.png",
+        source_id="source-b",
+    )
+    original_limit = Image.MAX_IMAGE_PIXELS
+
+    with monkeypatch.context() as scoped:
+        scoped.setattr(Image, "MAX_IMAGE_PIXELS", 1)
+        with pytest.raises(IntegrityError) as caught:
+            validate_records([(image, _enrichment()), (missing, _enrichment())])
+
+    message = str(caught.value)
+    assert f"media is unreadable: {image_path}" in message
+    assert "exceeds limit" in message
+    assert f"media is missing or unreadable: {missing_path}" in message
+    assert original_limit == Image.MAX_IMAGE_PIXELS
+
+
 def test_validate_mounts_uses_injected_mount_predicate() -> None:
     required = [Path("/Volumes/Extreme SSD"), Path("/Volumes/CameraTrapPython")]
     inspected: list[Path] = []

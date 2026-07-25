@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, TypeVar
 
 from PIL import Image, UnidentifiedImageError
+from PIL.Image import DecompressionBombError
 
 from jaguars.visualization.final_lineage import Enrichment
 from jaguars.visualization.final_records import FrozenAnnotation, TerminalRecord
@@ -283,7 +284,7 @@ def validate_media(path: Path) -> MediaIntegrity:
         with path.open("rb") as media:
             for chunk in iter(lambda: media.read(HASH_CHUNK_SIZE), b""):
                 digest.update(chunk)
-    except (OSError, ValueError, UnidentifiedImageError) as exc:
+    except (DecompressionBombError, OSError, ValueError, UnidentifiedImageError) as exc:
         raise IntegrityError(f"media is unreadable: {path}: {exc}") from exc
 
     return MediaIntegrity(
