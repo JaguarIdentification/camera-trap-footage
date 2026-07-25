@@ -1,0 +1,484 @@
+import json
+import os
+from collections.abc import Sequence
+from datetime import datetime, timezone
+from pathlib import Path
+from types import MappingProxyType
+from typing import Any, cast
+
+import pytest
+
+from jaguars.visualization.final_dataset import (
+    Audit,
+    DEFAULT_ADDRESS,
+    DEFAULT_DATABASE_DIR,
+    DEFAULT_DATASET_DIR,
+    DEFAULT_DATASET_NAME,
+    DEFAULT_MANIFEST_PATHS,
+    DEFAULT_PORT,
+    DEFAULT_REPORT_DIR,
+    DEFAULT_TERMINAL_EXPORT_DIR,
+    DEFAULT_UPSTREAM_EXPORT_DIRS,
+    DatasetExistsError,
+    OverwriteDeclinedError,
+    RunReport,
+    RuntimePaths,
+    Services,
+    SnapshotSummary,
+    build_validated_records,
+    configure_fiftyone_environment,
+    confirm_overwrite,
+    default_runtime_paths,
+    launch_and_wait,
+    parse_args,
+    run,
+    write_report,
+)
+from jaguars.visualization.final_lineage import Enrichment
+from jaguars.visualization.final_records import TerminalRecord
+from jaguars.visualization.final_validation import MediaIntegrity, ValidatedRecord
+
+
+def test_cli_and_runtime_defaults_are_the_approved_final_snapshot_values() -> None:
+    args = parse_args([])
+    paths = default_runtime_paths()
+
+    assert (args.dataset_name, args.address, args.port) == (
+        "JaguarCameraTrap_Final_Curated_v1",
+        DEFAULT_ADDRESS,
+        DEFAULT_PORT,
+    )
+    assert paths.terminal_export_dir == DEFAULT_TERMINAL_EXPORT_DIR
+    assert paths.upstream_export_dirs == DEFAULT_UPSTREAM_EXPORT_DIRS
+    assert paths.manifest_paths == DEFAULT_MANIFEST_PATHS
+    assert paths.database_dir == DEFAULT_DATABASE_DIR
+    assert paths.report_dir == DEFAULT_REPORT_DIR
+    assert paths.dataset_dir == DEFAULT_DATASET_DIR
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["--dry-run", "--launch-only"],
+        ["--create-only", "--launch-only"],
+        ["--dry-run", "--overwrite"],
+        ["--launch-only", "--overwrite"],
+        ["--yes"],
+    ],
+)
+def test_cli_rejects_incompatible_modes(argv: list[str]) -> None:
+    with pytest.raises(SystemExit) as caught:
+        parse_args(argv)
+
+    assert caught.value.code == 2
+
+
+@pytest.mark.parametrize("answer", ["wrong-name", "", "yes", "JaguarCameraTrap_Final_Curated_V1"])
+def test_overwrite_confirmation_requires_the_exact_dataset_name(answer: str) -> None:
+    assert (
+        confirm_overwrite(
+            "JaguarCameraTrap_Final_Curated_v1",
+            existing_count=1200,
+            proposed_count=1367,
+            input_fn=lambda _prompt: answer,
+        )
+        is False
+    )
+
+
+def test_overwrite_confirmation_accepts_the_exact_dataset_name() -> None:
+    assert (
+        confirm_overwrite(
+            "JaguarCameraTrap_Final_Curated_v1",
+            existing_count=1200,
+            proposed_count=1367,
+            input_fn=lambda _prompt: "JaguarCameraTrap_Final_Curated_v1",
+        )
+        is True
+    )
+
+
+def test_default_confirmation_reads_builtins_input_dynamically(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("builtins.input", lambda _prompt: DEFAULT_DATASET_NAME)
+
+    assert confirm_overwrite(DEFAULT_DATASET_NAME, 1200, 1367) is True
+
+
+def test_fiftyone_paths_are_configured_before_any_lazy_import(tmp_path: Path) -> None:
+    state_root = tmp_path / "state"
+    paths = RuntimePaths(
+        intermediate_dir=tmp_path / "data/intermediate/v1",
+        terminal_export_dir=tmp_path / "data/intermediate/v1/fo_jaguars/terminal",
+        upstream_export_dirs=(),
+        manifest_paths=(),
+        state_root=state_root,
+        database_dir=state_root / "var/lib/mongo",
+        report_dir=state_root / DEFAULT_DATASET_NAME,
+        dataset_dir=state_root / "datasets",
+        config_path=state_root / "config.json",
+        model_zoo_dir=state_root / "models",
+        plugins_dir=state_root / "plugins",
+        mount_roots=(),
+    )
+
+    configure_fiftyone_environment(paths)
+
+    assert os.environ["FIFTYONE_CONFIG_PATH"] == str(paths.config_path)
+    assert os.environ["FIFTYONE_DATABASE_DIR"] == str(paths.database_dir)
+    assert os.environ["FIFTYONE_DATASET_ZOO_DIR"] == str(paths.dataset_dir)
+    assert os.environ["FIFTYONE_DEFAULT_DATASET_DIR"] == str(paths.dataset_dir)
+    assert os.environ["FIFTYONE_MODEL_ZOO_DIR"] == str(paths.model_zoo_dir)
+    assert os.environ["FIFTYONE_PLUGINS_DIR"] == str(paths.plugins_dir)
+
+
+def _runtime_paths(tmp_path: Path) -> RuntimePaths:
+    state_root = tmp_path / "state"
+    return RuntimePaths(
+        intermediate_dir=tmp_path / "data/intermediate/v1",
+        terminal_export_dir=tmp_path / "data/intermediate/v1/fo_jaguars/terminal",
+        upstream_export_dirs=(),
+        manifest_paths=(),
+        state_root=state_root,
+        database_dir=state_root / "var/lib/mongo",
+        report_dir=state_root / DEFAULT_DATASET_NAME,
+        dataset_dir=state_root / "datasets",
+        config_path=state_root / "config.json",
+        model_zoo_dir=state_root / "models",
+        plugins_dir=state_root / "plugins",
+        mount_roots=(),
+    )
+
+
+def _record(tmp_path: Path) -> ValidatedRecord:
+    terminal = TerminalRecord(
+        source_id="source-a",
+        filepath=tmp_path / "a.jpg",
+        relative_filepath="data/a.jpg",
+        jaguar_id="F11",
+        bboxes_body={"detections": [{"bounding_box": [0.1, 0.2, 0.3, 0.4]}]},
+        segmentations_body={
+            "detections": [
+                {
+                    "bounding_box": [0.1, 0.2, 0.3, 0.4],
+                    "mask": [[0, 1], [1, 0]],
+                }
+            ]
+        },
+    )
+    return ValidatedRecord(
+        terminal=terminal,
+        enrichment=Enrichment(
+            status="matched",
+            match_method="source_id",
+            fields=MappingProxyType({"closed_set_split": "train"}),
+        ),
+        integrity=MediaIntegrity("a" * 64, 100, 8, 6),
+    )
+
+
+def _services(
+    *,
+    events: list[str],
+    reports: list[RunReport],
+    audit: Audit,
+    existing: bool = False,
+    input_answer: str = "",
+) -> Services:
+    dataset = cast(Any, [object()] * 1200)
+
+    def forbidden(label: str) -> Any:
+        raise AssertionError(f"{label} must not be called")
+
+    return Services(
+        validate_runtime=lambda paths: events.append("validate") or paths,
+        audit=lambda paths: events.append("audit") or audit,
+        dataset_exists=lambda name: events.append("exists") or existing,
+        load_dataset=lambda name: events.append("load") or dataset,
+        delete_dataset=lambda name: events.append(f"delete:{name}"),
+        create_snapshot=lambda records, name, temporary: events.append("create") or dataset,
+        verify_snapshot=lambda snapshot, records: events.append("verify")
+        or SnapshotSummary(
+            constructed_count=len(records),
+            field_population={"jaguar_id": len(records)},
+            saved_views=("All final samples",),
+        ),
+        launch=lambda snapshot, address, port: events.append("launch"),
+        write_report=lambda report, report_dir: reports.append(report) or report_dir / "run.json",
+        now=lambda: datetime(2026, 7, 25, 12, 0, tzinfo=timezone.utc),
+        input_fn=lambda prompt: input_answer,
+        output_fn=lambda message: events.append(f"print:{message}"),
+    )
+
+
+def test_dry_run_audits_and_reports_without_fiftyone_services(tmp_path: Path) -> None:
+    events: list[str] = []
+    reports: list[RunReport] = []
+    audit = Audit(records=(_record(tmp_path),), terminal_count=1, lineage_candidate_count=6)
+    services = _services(events=events, reports=reports, audit=audit)
+    services = Services(
+        **{
+            **services.__dict__,
+            "dataset_exists": lambda name: pytest.fail("dry-run connected to FiftyOne"),
+            "load_dataset": lambda name: pytest.fail("dry-run connected to FiftyOne"),
+            "delete_dataset": lambda name: pytest.fail("dry-run connected to FiftyOne"),
+            "create_snapshot": lambda records, name, temporary: pytest.fail("dry-run connected to FiftyOne"),
+            "verify_snapshot": lambda snapshot, records: pytest.fail("dry-run connected to FiftyOne"),
+            "launch": lambda snapshot, address, port: pytest.fail("dry-run launched the App"),
+        }
+    )
+
+    assert run(parse_args(["--dry-run"]), services=services, paths=_runtime_paths(tmp_path)) == 0
+
+    assert events == ["validate", "audit"]
+    assert reports[0].status == "completed"
+    assert reports[0].counts["terminal"] == 1
+    assert reports[0].counts["validated"] == 1
+
+
+def test_launch_only_validates_storage_then_loads_without_media_audit(tmp_path: Path) -> None:
+    events: list[str] = []
+    reports: list[RunReport] = []
+    audit = Audit(records=(_record(tmp_path),), terminal_count=1, lineage_candidate_count=6)
+    services = _services(events=events, reports=reports, audit=audit)
+    services = Services(
+        **{
+            **services.__dict__,
+            "audit": lambda paths: pytest.fail("launch-only audited media"),
+            "dataset_exists": lambda name: pytest.fail("launch-only queried before loading"),
+        }
+    )
+
+    assert run(parse_args(["--launch-only"]), services=services, paths=_runtime_paths(tmp_path)) == 0
+
+    assert events == ["validate", "load", "launch"]
+    assert reports[0].mode == "launch-only"
+
+
+def test_ordinary_creation_refuses_an_existing_dataset_after_audit(tmp_path: Path) -> None:
+    events: list[str] = []
+    reports: list[RunReport] = []
+    audit = Audit(records=(_record(tmp_path),), terminal_count=1, lineage_candidate_count=6)
+    services = _services(events=events, reports=reports, audit=audit, existing=True)
+
+    with pytest.raises(DatasetExistsError, match=DEFAULT_DATASET_NAME):
+        run(parse_args(["--create-only"]), services=services, paths=_runtime_paths(tmp_path))
+
+    assert events == ["validate", "audit", "exists"]
+    assert reports[0].status == "failed"
+    assert reports[0].failure == {
+        "type": "DatasetExistsError",
+        "message": f"dataset already exists: {DEFAULT_DATASET_NAME}",
+    }
+
+
+def test_default_mode_audits_creates_reports_then_launches(tmp_path: Path) -> None:
+    events: list[str] = []
+    reports: list[RunReport] = []
+    audit = Audit(records=(_record(tmp_path),), terminal_count=1, lineage_candidate_count=6)
+    services = _services(events=events, reports=reports, audit=audit)
+    services = Services(
+        **{
+            **services.__dict__,
+            "write_report": lambda report, report_dir: events.append("report") or reports.append(report) or report_dir / "run.json",
+        }
+    )
+
+    assert run(parse_args([]), services=services, paths=_runtime_paths(tmp_path)) == 0
+
+    assert events == [
+        "validate",
+        "audit",
+        "exists",
+        "create",
+        "verify",
+        "report",
+        "launch",
+    ]
+
+
+def test_overwrite_decline_never_deletes_a_dataset_or_media(tmp_path: Path) -> None:
+    events: list[str] = []
+    reports: list[RunReport] = []
+    media_path = _record(tmp_path).terminal.filepath
+    audit = Audit(records=(_record(tmp_path),), terminal_count=1, lineage_candidate_count=6)
+    services = _services(
+        events=events,
+        reports=reports,
+        audit=audit,
+        existing=True,
+        input_answer="no",
+    )
+
+    with pytest.raises(OverwriteDeclinedError):
+        run(parse_args(["--create-only", "--overwrite"]), services=services, paths=_runtime_paths(tmp_path))
+
+    assert events[:4] == ["validate", "audit", "exists", "load"]
+    assert not any(event.startswith("delete:") for event in events)
+    assert "create" not in events
+    assert not hasattr(Path, "delete")
+    assert media_path == tmp_path / "a.jpg"
+
+
+def test_overwrite_audits_and_confirms_before_deleting_the_exact_record(tmp_path: Path) -> None:
+    events: list[str] = []
+    reports: list[RunReport] = []
+    audit = Audit(records=(_record(tmp_path),), terminal_count=1, lineage_candidate_count=6)
+    services = _services(
+        events=events,
+        reports=reports,
+        audit=audit,
+        existing=True,
+        input_answer=DEFAULT_DATASET_NAME,
+    )
+
+    assert (
+        run(
+            parse_args(["--create-only", "--overwrite"]),
+            services=services,
+            paths=_runtime_paths(tmp_path),
+        )
+        == 0
+    )
+
+    significant = [event for event in events if event in {"validate", "audit", "exists", "load", "create", "verify"} or event.startswith("delete:")]
+    assert significant == [
+        "validate",
+        "audit",
+        "exists",
+        "load",
+        f"delete:{DEFAULT_DATASET_NAME}",
+        "create",
+        "verify",
+    ]
+    assert reports[0].counts["constructed"] == 1
+
+
+def test_yes_overwrite_is_noninteractive_but_still_prints_counts(tmp_path: Path) -> None:
+    events: list[str] = []
+    reports: list[RunReport] = []
+    audit = Audit(records=(_record(tmp_path),), terminal_count=1, lineage_candidate_count=6)
+    services = _services(events=events, reports=reports, audit=audit, existing=True)
+    services = Services(
+        **{
+            **services.__dict__,
+            "input_fn": lambda prompt: pytest.fail("--yes prompted for confirmation"),
+        }
+    )
+
+    assert (
+        run(
+            parse_args(["--create-only", "--overwrite", "--yes"]),
+            services=services,
+            paths=_runtime_paths(tmp_path),
+        )
+        == 0
+    )
+
+    assert "print:Existing dataset samples: 1200" in events
+    assert "print:Proposed dataset samples: 1" in events
+    assert f"delete:{DEFAULT_DATASET_NAME}" in events
+
+
+def test_build_validated_records_loads_terminal_and_all_lineage_then_validates_expected_count(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from jaguars.visualization import final_dataset
+
+    paths = _runtime_paths(tmp_path)
+    validated = _record(tmp_path)
+    terminal = validated.terminal
+    candidate = object()
+    enrichment = validated.enrichment
+    events: list[object] = []
+
+    class Index:
+        def enrich(self, record: TerminalRecord) -> Enrichment:
+            assert record is terminal
+            return enrichment
+
+    monkeypatch.setattr(
+        final_dataset,
+        "load_terminal_records",
+        lambda export_dir: events.append(("terminal", export_dir)) or [terminal],
+    )
+    monkeypatch.setattr(
+        final_dataset,
+        "load_lineage_candidates",
+        lambda intermediate_dir: events.append(("lineage", intermediate_dir)) or (candidate,),
+    )
+    monkeypatch.setattr(
+        final_dataset.LineageIndex,
+        "from_candidates",
+        lambda candidates: events.append(("index", tuple(candidates))) or Index(),
+    )
+
+    def validate(
+        pairs: Sequence[tuple[TerminalRecord, Enrichment]],
+        *,
+        expected_count: int | None = None,
+    ) -> list[ValidatedRecord]:
+        events.append(("validate-records", tuple(pairs), expected_count))
+        return [validated]
+
+    monkeypatch.setattr(final_dataset, "validate_records", validate)
+
+    audit = build_validated_records(paths, expected_count=1)
+
+    assert audit == Audit(records=(validated,), terminal_count=1, lineage_candidate_count=1)
+    assert events == [
+        ("terminal", paths.terminal_export_dir),
+        ("lineage", paths.intermediate_dir),
+        ("index", (candidate,)),
+        ("validate-records", ((terminal, enrichment),), 1),
+    ]
+
+
+def test_reports_serialize_success_and_failure_and_atomically_publish_latest(tmp_path: Path) -> None:
+    audit = Audit(records=(_record(tmp_path),), terminal_count=1, lineage_candidate_count=6)
+    report = RunReport.from_audit(
+        audit,
+        paths=_runtime_paths(tmp_path),
+        started_at=datetime(2026, 7, 25, 12, 34, 56, tzinfo=timezone.utc),
+    ).completed(
+        SnapshotSummary(1, {"jaguar_id": 1}, ("All final samples",)),
+        finished_at=datetime(2026, 7, 25, 12, 35, tzinfo=timezone.utc),
+    )
+
+    report_path = write_report(report, tmp_path / "reports")
+
+    serialized = json.loads(report_path.read_text(encoding="utf-8"))
+    latest = json.loads((tmp_path / "reports/latest.json").read_text(encoding="utf-8"))
+    assert serialized == latest == report.to_dict()
+    assert report_path.name == "20260725T123456Z_jaguar-camera-trap-final-curated-v1.json"
+    assert not list((tmp_path / "reports").glob("*.tmp"))
+
+    failure = report.failed(ValueError("injected failure"))
+    failure_payload = json.loads(json.dumps(failure.to_dict()))
+    assert failure_payload["status"] == "failed"
+    assert failure_payload["failure"] == {
+        "type": "ValueError",
+        "message": "injected failure",
+    }
+
+
+def test_app_session_closes_after_wait_and_keyboard_interrupt() -> None:
+    events: list[str] = []
+
+    class Session:
+        def wait(self) -> None:
+            events.append("wait")
+            raise KeyboardInterrupt
+
+        def close(self) -> None:
+            events.append("close")
+
+    def launch_app(dataset: object, *, address: str, port: int) -> Session:
+        assert address == "localhost"
+        assert port == 5151
+        events.append("launch")
+        return Session()
+
+    launch_and_wait(object(), "localhost", 5151, launch_app=launch_app)
+
+    assert events == ["launch", "wait", "close"]
