@@ -1,3 +1,4 @@
+import hashlib
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any, cast
@@ -296,12 +297,16 @@ def test_identity_mismatch_removes_both_atomic_names(
     assert not fo.dataset_exists(temporary_name)
 
 
-def test_validation_failure_after_insert_removes_owned_temporary_dataset(
+def test_validation_failure_after_insert_removes_only_owned_temporary_dataset(
     tmp_path: Path,
     dataset_names: tuple[str, str],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     final_name, temporary_name = dataset_names
+    record = _validated_record(tmp_path)
+    source_path = record.terminal.filepath
+    source_bytes = source_path.read_bytes()
+    source_sha256 = hashlib.sha256(source_bytes).hexdigest()
 
     def fail_validation(dataset: fo.Dataset, records: list[ValidatedRecord]) -> None:
         raise SnapshotValidationError("forced validation failure")
@@ -309,10 +314,13 @@ def test_validation_failure_after_insert_removes_owned_temporary_dataset(
     monkeypatch.setattr(final_snapshot, "_validate_snapshot", fail_validation)
 
     with pytest.raises(SnapshotValidationError, match="forced validation failure"):
-        create_snapshot([_validated_record(tmp_path)], final_name, temporary_name)
+        create_snapshot([record], final_name, temporary_name)
 
     assert not fo.dataset_exists(final_name)
     assert not fo.dataset_exists(temporary_name)
+    assert source_path.is_file()
+    assert source_path.read_bytes() == source_bytes
+    assert hashlib.sha256(source_path.read_bytes()).hexdigest() == source_sha256
 
 
 def test_existing_final_dataset_is_untouched(
