@@ -52,11 +52,11 @@ Generated state stays on external storage:
 
 Creation refuses to run unless `/Volumes/Extreme SSD` and `/Volumes/CameraTrapPython` are actual mounted filesystems and every configured generated-state path resolves below `/Volumes/CameraTrapPython/fiftyone`.
 
-The snapshot is immutable during ordinary operation. If the final dataset already exists, creation fails. Replacement requires `--overwrite`, prints existing and proposed sample counts, and requires interactive confirmation. Noninteractive replacement additionally requires `--yes`. Replacement first builds and validates an ownership-unique staging dataset while the old final remains published. It then renames the old final to an ownership-unique backup, promotes staging, and deletes the backup only after successful promotion. Promotion failure restores the old final and cleans only owned staging state; media is never deleted.
+The snapshot is immutable during ordinary operation. If the final dataset already exists, creation fails. Replacement requires `--overwrite`, prints existing and proposed sample counts, and requires interactive confirmation. Noninteractive replacement additionally requires `--yes`. Replacement first builds and validates an ownership-unique staging dataset while the old final remains published. The generated staging name is collision-checked before construction, and the adapter persists an unguessable ownership token in dataset metadata before any destructive cleanup or promotion is permitted. It then renames the old final to an ownership-unique backup, promotes staging, and deletes the backup only after successful promotion. Promotion failure re-queries database names and IDs, removes a promoted dataset only when its persisted ID and token prove ownership, restores the old final when the name is available, and never deletes a foreign claimant. Media is never deleted.
 
 ## Atomic creation
 
-Creation builds a temporary persistent FiftyOne dataset. All source and constructed-dataset checks run before the temporary dataset is renamed to `JaguarCameraTrap_Final_Curated_v1`. A failed build removes only its temporary dataset record and retains a failure report. Transactional replacement applies the same validation before any rename and rolls back the old final if promotion fails. It never removes an existing final before the replacement is complete or changes any media.
+Creation builds a temporary persistent FiftyOne dataset. All source and constructed-dataset checks run before the temporary dataset is renamed to `JaguarCameraTrap_Final_Curated_v1`. A failed build removes a temporary dataset only when a database re-query proves its generated ID and persisted ownership token. If the FiftyOne constructor fails after inserting metadata but before ownership can be persisted, the unproven artifact is retained with an explicit recoverable-artifact error rather than risking deletion of a racing foreign dataset. Transactional replacement applies the same validation before any rename and rolls back the old final if promotion fails. It never removes an existing final before the replacement is complete or changes any media.
 
 ## Command-line interface
 
@@ -120,7 +120,7 @@ Pure parsing, enrichment, and validation code remains independently testable wit
 
 Unit tests cover export parsing, exact and ambiguous lineage joins, schema mapping, content hashes, malformed annotations, duplicate detection, CLI validation, overwrite safety, and external-path guards.
 
-An integration test uses a temporary isolated FiftyOne database and image fixtures to verify atomic creation, schema, annotations, saved views, immutability, and cleanup. Tests never connect to or mutate the production database.
+An integration test uses a temporary isolated FiftyOne database and image fixtures to verify atomic creation, schema, annotations, saved views, immutability, token-proven cleanup, generated-name collisions, constructor races, and rename failures both before and after database persistence. Tests never connect to or mutate the production database.
 
 Before production creation, a real-data `--dry-run` must verify:
 

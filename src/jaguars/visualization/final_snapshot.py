@@ -1,8 +1,11 @@
 from collections.abc import Sequence
+from dataclasses import dataclass
+from typing import Any, cast
 from uuid import uuid4
 
 import fiftyone as fo
 import fiftyone.core.fields as fof
+import fiftyone.core.odm as foo
 import numpy as np
 from fiftyone import ViewField as F
 
@@ -11,6 +14,7 @@ from jaguars.visualization.final_records import FrozenAnnotation, annotation_to_
 from jaguars.visualization.final_validation import ValidatedRecord
 
 BATCH_SIZE = 100
+OWNERSHIP_INFO_KEY = "jaguars_snapshot_ownership_token"
 
 APPROVED_ENRICHMENT_FIELDS = (
     "closed_set_split",
@@ -98,6 +102,12 @@ class SnapshotValidationError(SnapshotError):
 
 class SnapshotReplacementError(SnapshotError):
     """Raised when transactional replacement cannot safely complete."""
+
+
+@dataclass(frozen=True)
+class _OwnedDataset:
+    dataset_id: Any
+    token: str
 
 
 def _validate_decoded_mask(mask: object, context: str) -> None:
@@ -339,6 +349,94 @@ def _rename_dataset(dataset: fo.Dataset, name: str) -> None:
     dataset.name = name
 
 
+def _database_document_by_name(name: str) -> dict[str, Any] | None:
+    return cast(
+        dict[str, Any] | None,
+        foo.get_db_conn().datasets.find_one({"name": name}),
+    )
+
+
+def _database_document_by_id(dataset_id: Any) -> dict[str, Any] | None:
+    return cast(
+        dict[str, Any] | None,
+        foo.get_db_conn().datasets.find_one({"_id": dataset_id}),
+    )
+
+
+def _document_name(document: dict[str, Any] | None) -> str | None:
+    if document is None:
+        return None
+    name = document.get("name")
+    return name if isinstance(name, str) else None
+
+
+def _document_has_ownership(
+    document: dict[str, Any] | None,
+    ownership: _OwnedDataset,
+) -> bool:
+    if document is None or document.get("_id") != ownership.dataset_id:
+        return False
+    info = document.get("info")
+    return isinstance(info, dict) and info.get(OWNERSHIP_INFO_KEY) == ownership.token
+
+
+def _owned_document(ownership: _OwnedDataset) -> dict[str, Any] | None:
+    document = _database_document_by_id(ownership.dataset_id)
+    return document if _document_has_ownership(document, ownership) else None
+
+
+def _delete_owned_dataset(
+    dataset: fo.Dataset,
+    ownership: _OwnedDataset,
+) -> bool:
+    if _owned_document(ownership) is None:
+        return False
+
+    dataset._doc.reload()
+    if dataset._doc.id != ownership.dataset_id:
+        raise SnapshotReplacementError("refusing to delete staging dataset whose database identity changed")
+    if dataset.info.get(OWNERSHIP_INFO_KEY) != ownership.token:
+        raise SnapshotReplacementError("refusing to delete staging dataset without persisted ownership proof")
+
+    dataset.delete()
+    if _database_document_by_id(ownership.dataset_id) is not None:
+        raise SnapshotReplacementError("owned staging dataset remained after cleanup")
+    return True
+
+
+def _create_owned_staging(
+    name: str,
+    ownership_token: str,
+) -> tuple[fo.Dataset, _OwnedDataset]:
+    try:
+        dataset = fo.Dataset(name, persistent=True)
+    except BaseException as construction_error:
+        persisted = _database_document_by_name(name)
+        if isinstance(construction_error, ValueError) and "not available" in str(construction_error):
+            raise SnapshotCollisionError(f"generated build dataset became occupied: {name}") from construction_error
+        if persisted is not None:
+            raise SnapshotReplacementError(
+                f"staging construction failed after metadata was persisted at {name}; " "ownership could not be proven, so the artifact was retained"
+            ) from construction_error
+        raise
+
+    ownership = _OwnedDataset(dataset_id=dataset._doc.id, token=ownership_token)
+    dataset.info[OWNERSHIP_INFO_KEY] = ownership_token
+    try:
+        dataset.save()
+    except BaseException as ownership_error:
+        if _owned_document(ownership) is not None:
+            _delete_owned_dataset(dataset, ownership)
+            raise
+        raise SnapshotReplacementError(
+            f"staging ownership metadata failed at {name}; " "ownership could not be proven, so the artifact was retained"
+        ) from ownership_error
+
+    if _owned_document(ownership) is None:
+        raise SnapshotReplacementError(f"staging ownership metadata was not persisted at {name}; " "the unproven artifact was retained")
+    return dataset, ownership
+
+
 def _refuse_replacement_collisions(dataset_name: str, temporary_name: str) -> None:
     if dataset_name == temporary_name:
         raise SnapshotCollisionError("final and temporary dataset names must be distinct")
@@ -348,58 +446,174 @@ def _refuse_replacement_collisions(dataset_name: str, temporary_name: str) -> No
         raise SnapshotCollisionError(f"temporary dataset already exists: {temporary_name}")
 
 
-def _rollback_original(
+def _restore_original(
     original: fo.Dataset,
+    original_id: Any,
     dataset_name: str,
+    backup_name: str,
     promotion_error: BaseException,
 ) -> None:
+    original_document = _database_document_by_id(original_id)
+    original_name = _document_name(original_document)
+    final_document = _database_document_by_name(dataset_name)
+
+    if original_name == dataset_name and final_document is not None and final_document.get("_id") == original_id:
+        return
+    if original_name != backup_name:
+        raise SnapshotReplacementError(f"replacement failed and the old dataset location is unknown: {original_name!r}") from promotion_error
+    if final_document is not None:
+        raise SnapshotReplacementError(
+            f"foreign dataset occupies final name {dataset_name}; " f"old dataset remains safely recoverable at {backup_name}"
+        ) from promotion_error
+
+    original._doc.reload()
     try:
         _rename_dataset(original, dataset_name)
     except BaseException as rollback_error:
+        restored_document = _database_document_by_id(original_id)
+        restored_final = _database_document_by_name(dataset_name)
+        if _document_name(restored_document) == dataset_name and restored_final is not None and restored_final.get("_id") == original_id:
+            return
         raise SnapshotReplacementError(
-            f"replacement promotion failed and rollback failed; " f"old dataset remains at {original.name}: {rollback_error}"
+            f"replacement promotion failed and rollback failed; " f"old dataset remains at {_document_name(restored_document)!r}: {rollback_error}"
         ) from promotion_error
+
+    restored_document = _database_document_by_id(original_id)
+    restored_final = _database_document_by_name(dataset_name)
+    if _document_name(restored_document) != dataset_name or restored_final is None or restored_final.get("_id") != original_id:
+        raise SnapshotReplacementError(
+            f"rollback did not restore the old dataset; " f"it remains at {_document_name(restored_document)!r}"
+        ) from promotion_error
+
+
+def _recover_backup_rename_failure(
+    original: fo.Dataset,
+    original_id: Any,
+    dataset_name: str,
+    backup_name: str,
+    rename_error: BaseException,
+) -> None:
+    original_document = _database_document_by_id(original_id)
+    original_name = _document_name(original_document)
+    final_document = _database_document_by_name(dataset_name)
+    if original_name == dataset_name and final_document is not None and final_document.get("_id") == original_id:
+        return
+    if original_name == backup_name:
+        _restore_original(
+            original,
+            original_id,
+            dataset_name,
+            backup_name,
+            rename_error,
+        )
+        return
+    raise SnapshotReplacementError(f"old dataset rename failed with unexpected database location {original_name!r}") from rename_error
+
+
+def _recover_promotion_failure(
+    staged: fo.Dataset,
+    ownership: _OwnedDataset,
+    original: fo.Dataset,
+    original_id: Any,
+    dataset_name: str,
+    backup_name: str,
+    promotion_error: BaseException,
+) -> None:
+    final_document = _database_document_by_name(dataset_name)
+    if final_document is not None:
+        if _document_has_ownership(final_document, ownership):
+            _delete_owned_dataset(staged, ownership)
+        else:
+            raise SnapshotReplacementError(
+                f"foreign dataset occupies final name {dataset_name}; " f"old dataset remains safely recoverable at {backup_name}"
+            ) from promotion_error
+
+    _restore_original(
+        original,
+        original_id,
+        dataset_name,
+        backup_name,
+        promotion_error,
+    )
 
 
 def _promote_replacement(
     staged: fo.Dataset,
+    ownership: _OwnedDataset,
     dataset_name: str,
     temporary_name: str,
 ) -> fo.Dataset:
-    original = fo.load_dataset(dataset_name)
+    original_document = _database_document_by_name(dataset_name)
+    if original_document is None:
+        raise SnapshotReplacementError(f"old final dataset disappeared before replacement: {dataset_name}")
+    original_id = original_document["_id"]
+    original = fo.load_dataset(dataset_name, reload=True)
     backup_name = _build_backup_name(temporary_name)
-    if fo.dataset_exists(backup_name):
+    if _database_document_by_name(backup_name) is not None:
         raise SnapshotCollisionError(f"replacement backup dataset already exists: {backup_name}")
 
     try:
         _rename_dataset(original, backup_name)
     except BaseException as first_rename_error:
-        if original.name == backup_name and not fo.dataset_exists(dataset_name):
-            _rollback_original(original, dataset_name, first_rename_error)
+        _recover_backup_rename_failure(
+            original,
+            original_id,
+            dataset_name,
+            backup_name,
+            first_rename_error,
+        )
         raise
+
+    renamed_original = _database_document_by_id(original_id)
+    if _document_name(renamed_original) != backup_name:
+        state_error = SnapshotReplacementError("old dataset rename did not persist")
+        _recover_backup_rename_failure(
+            original,
+            original_id,
+            dataset_name,
+            backup_name,
+            state_error,
+        )
+        raise state_error
 
     try:
         _rename_dataset(staged, dataset_name)
     except BaseException as promotion_error:
-        _rollback_original(original, dataset_name, promotion_error)
+        _recover_promotion_failure(
+            staged,
+            ownership,
+            original,
+            original_id,
+            dataset_name,
+            backup_name,
+            promotion_error,
+        )
         raise
 
+    promoted_document = _database_document_by_name(dataset_name)
+    if not _document_has_ownership(promoted_document, ownership):
+        state_error = SnapshotReplacementError("replacement promotion did not persist owned staging identity")
+        _recover_promotion_failure(
+            staged,
+            ownership,
+            original,
+            original_id,
+            dataset_name,
+            backup_name,
+            state_error,
+        )
+        raise state_error
+
     try:
+        original._doc.reload()
+        original_document = _database_document_by_id(original_id)
+        if _document_name(original_document) != backup_name:
+            raise SnapshotReplacementError("refusing to delete old dataset outside the verified backup name")
         original.delete()
     except BaseException as cleanup_error:
         raise SnapshotReplacementError(f"replacement published but old backup cleanup failed at {backup_name}: {cleanup_error}") from cleanup_error
+    staged._doc.reload()
     return staged
-
-
-def _cleanup_owned_build(
-    dataset: fo.Dataset | None,
-    owned_build_name: str | None,
-    dataset_name: str,
-) -> None:
-    if dataset is not None and not dataset.deleted and dataset.name != dataset_name:
-        dataset.delete()
-    elif owned_build_name is not None and fo.dataset_exists(owned_build_name):
-        fo.delete_dataset(owned_build_name)
 
 
 def create_snapshot(
@@ -410,23 +624,41 @@ def create_snapshot(
     replace_existing: bool = False,
 ) -> fo.Dataset:
     """Atomically publish a persistent, validated FiftyOne snapshot."""
-    owned_build_name: str | None = None
     dataset: fo.Dataset | None = None
+    ownership: _OwnedDataset | None = None
     try:
         if replace_existing:
             _refuse_replacement_collisions(dataset_name, temporary_name)
         else:
             _refuse_collisions(dataset_name, temporary_name)
         owned_build_name = _build_dataset_name(temporary_name)
-        dataset = fo.Dataset(owned_build_name, persistent=True)
+        if _database_document_by_name(owned_build_name) is not None:
+            raise SnapshotCollisionError(f"generated build dataset already exists: {owned_build_name}")
+        dataset, ownership = _create_owned_staging(
+            owned_build_name,
+            uuid4().hex,
+        )
         _declare_schema(dataset)
         _insert_bounded(dataset, records)
         _save_views(dataset)
         _validate_snapshot(dataset, records)
         if replace_existing:
-            return _promote_replacement(dataset, dataset_name, temporary_name)
+            return _promote_replacement(
+                dataset,
+                ownership,
+                dataset_name,
+                temporary_name,
+            )
         _rename_dataset(dataset, dataset_name)
+        published_document = _database_document_by_name(dataset_name)
+        if not _document_has_ownership(published_document, ownership):
+            raise SnapshotReplacementError("snapshot publication did not persist owned staging identity")
+        dataset._doc.reload()
         return dataset
-    except BaseException:
-        _cleanup_owned_build(dataset, owned_build_name, dataset_name)
+    except BaseException as operation_error:
+        if dataset is not None and ownership is not None:
+            try:
+                _delete_owned_dataset(dataset, ownership)
+            except BaseException as cleanup_error:
+                raise SnapshotReplacementError(f"owned staging cleanup failed: {cleanup_error}") from operation_error
         raise

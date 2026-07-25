@@ -7,6 +7,7 @@ from typing import Any, cast
 import fiftyone as fo
 import fiftyone.core.dataset as fod
 import fiftyone.core.fields as fof
+import fiftyone.core.odm as foo
 import fiftyone.core.utils as fou
 import numpy as np
 import pytest
@@ -25,6 +26,23 @@ from jaguars.visualization.final_snapshot import (
     validated_record_to_sample,
 )
 from jaguars.visualization.final_validation import MediaIntegrity, ValidatedRecord
+
+
+def _database_document(name: str) -> dict[str, Any] | None:
+    return cast(
+        dict[str, Any] | None,
+        foo.get_db_conn().datasets.find_one({"name": name}),
+    )
+
+
+def _database_names_with_prefix(prefix: str) -> list[str]:
+    return sorted(
+        document["name"]
+        for document in foo.get_db_conn().datasets.find(
+            {"name": {"$regex": f"^{prefix}"}},
+            {"name": 1},
+        )
+    )
 
 
 def _validated_record(
@@ -418,66 +436,95 @@ def test_count_mismatch_removes_both_atomic_names(
     assert not fo.dataset_exists(temporary_name)
 
 
-def test_constructor_failure_after_metadata_insert_removes_temporary_dataset(
+def test_constructor_failure_after_metadata_insert_retains_unproven_artifact(
     tmp_path: Path,
     dataset_names: tuple[str, str],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     final_name, temporary_name = dataset_names
+    owned_build_name = f"{temporary_name}--build-constructor-failure"
 
     def fail_index_creation(sample_collection_name: str, frame_collection_name: str | None) -> None:
         raise RuntimeError("forced index creation failure")
 
+    monkeypatch.setattr(
+        final_snapshot,
+        "_build_dataset_name",
+        lambda temporary_base: owned_build_name,
+    )
     monkeypatch.setattr(fod, "_create_indexes", fail_index_creation)
 
-    with pytest.raises(RuntimeError, match="forced index creation failure"):
+    with pytest.raises(
+        SnapshotReplacementError,
+        match="ownership could not be proven.*retained",
+    ):
         create_snapshot([_validated_record(tmp_path)], final_name, temporary_name)
 
     assert not fo.dataset_exists(final_name)
     assert not fo.dataset_exists(temporary_name)
+    unproven = _database_document(owned_build_name)
+    assert unproven is not None
+    assert final_snapshot.OWNERSHIP_INFO_KEY not in unproven.get("info", {})
+    fo.delete_dataset(owned_build_name)
 
 
-def test_racing_temporary_base_claimant_survives_owned_constructor_failure(
+def test_generated_build_name_collision_is_never_deleted_or_modified(
     tmp_path: Path,
     dataset_names: tuple[str, str],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     final_name, temporary_name = dataset_names
-    owned_build_name = f"{temporary_name}--build-deterministic-owner-token"
-    original_refuse_collisions = final_snapshot._refuse_collisions
-    original_create_indexes = fod._create_indexes
-    index_calls = 0
+    occupied_build_name = f"{temporary_name}--build-deterministic-collision"
+    foreign = fo.Dataset(occupied_build_name, persistent=True)
+    foreign.info["owner"] = "foreign-generated-name"
+    foreign.save()
 
-    def claim_base_after_preflight(dataset_name: str, temporary_base: str) -> None:
-        original_refuse_collisions(dataset_name, temporary_base)
-        claimant = fo.Dataset(temporary_base, persistent=True)
-        claimant.info["owner"] = "racing-caller"
-        claimant.save()
-
-    def fail_owned_index_creation(sample_collection_name: str, frame_collection_name: str | None) -> None:
-        nonlocal index_calls
-        index_calls += 1
-        if index_calls == 1:
-            original_create_indexes(sample_collection_name, frame_collection_name)
-            return
-        raise RuntimeError("forced owned build index failure")
-
-    monkeypatch.setattr(final_snapshot, "_refuse_collisions", claim_base_after_preflight)
     monkeypatch.setattr(
         final_snapshot,
         "_build_dataset_name",
-        lambda temporary_base: owned_build_name,
-        raising=False,
+        lambda temporary_base: occupied_build_name,
     )
-    monkeypatch.setattr(fod, "_create_indexes", fail_owned_index_creation)
 
-    with pytest.raises(RuntimeError, match="forced owned build index failure"):
+    with pytest.raises(SnapshotCollisionError, match="generated build dataset already exists"):
         create_snapshot([_validated_record(tmp_path)], final_name, temporary_name)
 
-    claimant = fo.load_dataset(temporary_name)
-    assert claimant.info["owner"] == "racing-caller"
-    assert not fo.dataset_exists(owned_build_name)
+    assert fo.load_dataset(occupied_build_name).info["owner"] == "foreign-generated-name"
     assert not fo.dataset_exists(final_name)
+    foreign.delete()
+
+
+def test_constructor_name_race_never_deletes_unproven_claimant(
+    tmp_path: Path,
+    dataset_names: tuple[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    final_name, temporary_name = dataset_names
+    raced_build_name = f"{temporary_name}--build-constructor-race"
+    real_dataset_constructor = fo.Dataset
+    constructor_calls = 0
+
+    def racing_constructor(name: str, *args: Any, **kwargs: Any) -> fo.Dataset:
+        nonlocal constructor_calls
+        constructor_calls += 1
+        if constructor_calls == 1:
+            foreign = real_dataset_constructor(name, persistent=True)
+            foreign.info["owner"] = "foreign-racing-constructor"
+            foreign.save()
+        return real_dataset_constructor(name, *args, **kwargs)
+
+    monkeypatch.setattr(
+        final_snapshot,
+        "_build_dataset_name",
+        lambda temporary_base: raced_build_name,
+    )
+    monkeypatch.setattr(final_snapshot.fo, "Dataset", racing_constructor)
+
+    with pytest.raises(SnapshotCollisionError, match="generated build dataset became occupied"):
+        create_snapshot([_validated_record(tmp_path)], final_name, temporary_name)
+
+    assert fo.load_dataset(raced_build_name).info["owner"] == "foreign-racing-constructor"
+    assert not fo.dataset_exists(final_name)
+    fo.delete_dataset(raced_build_name)
 
 
 def test_snapshot_inserts_in_bounded_batches(
@@ -690,6 +737,145 @@ def test_transactional_replacement_second_rename_failure_rolls_back_old_final(
     assert calls == 3
     assert fo.load_dataset(final_name).info["generation"] == "old"
     assert not any(name.startswith(f"{temporary_name}--") for name in fo.list_datasets())
+
+
+def test_transactional_replacement_first_rename_failure_after_database_save_restores_old_final(
+    tmp_path: Path,
+    dataset_names: tuple[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    final_name, temporary_name = dataset_names
+    original, _, _ = _existing_snapshot(tmp_path, final_name)
+    original_id = original._doc.id
+    real_rename = final_snapshot._rename_dataset
+    calls = 0
+
+    def save_then_fail_with_stale_name(dataset: fo.Dataset, name: str) -> None:
+        nonlocal calls
+        calls += 1
+        old_name = dataset.name
+        old_slug = dataset.slug
+        real_rename(dataset, name)
+        if calls == 1:
+            dataset._doc.name = old_name
+            dataset._doc.slug = old_slug
+            raise RuntimeError("first rename failed after database save")
+
+    monkeypatch.setattr(
+        final_snapshot,
+        "_rename_dataset",
+        save_then_fail_with_stale_name,
+    )
+
+    with pytest.raises(RuntimeError, match="first rename failed after database save"):
+        create_snapshot(
+            [_validated_record(tmp_path)],
+            final_name,
+            temporary_name,
+            replace_existing=True,
+        )
+
+    final_document = _database_document(final_name)
+    assert final_document is not None
+    assert final_document["_id"] == original_id
+    assert final_document["info"]["generation"] == "old"
+    assert _database_names_with_prefix(f"{temporary_name}--") == []
+
+
+def test_transactional_replacement_promotion_failure_after_database_save_restores_old_final(
+    tmp_path: Path,
+    dataset_names: tuple[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    final_name, temporary_name = dataset_names
+    original, _, _ = _existing_snapshot(tmp_path, final_name)
+    original_id = original._doc.id
+    real_rename = final_snapshot._rename_dataset
+    calls = 0
+
+    def save_then_fail_with_stale_name(dataset: fo.Dataset, name: str) -> None:
+        nonlocal calls
+        calls += 1
+        old_name = dataset.name
+        old_slug = dataset.slug
+        real_rename(dataset, name)
+        if calls == 2:
+            dataset._doc.name = old_name
+            dataset._doc.slug = old_slug
+            raise RuntimeError("promotion failed after database save")
+
+    monkeypatch.setattr(
+        final_snapshot,
+        "_rename_dataset",
+        save_then_fail_with_stale_name,
+    )
+
+    with pytest.raises(RuntimeError, match="promotion failed after database save"):
+        create_snapshot(
+            [_validated_record(tmp_path)],
+            final_name,
+            temporary_name,
+            replace_existing=True,
+        )
+
+    final_document = _database_document(final_name)
+    assert final_document is not None
+    assert final_document["_id"] == original_id
+    assert final_document["info"]["generation"] == "old"
+    assert _database_names_with_prefix(f"{temporary_name}--") == []
+
+
+def test_transactional_replacement_never_deletes_foreign_final_claimed_during_promotion(
+    tmp_path: Path,
+    dataset_names: tuple[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    final_name, temporary_name = dataset_names
+    original, _, _ = _existing_snapshot(tmp_path, final_name)
+    original_id = original._doc.id
+    real_rename = final_snapshot._rename_dataset
+    calls = 0
+
+    def foreign_claim_then_fail(dataset: fo.Dataset, name: str) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            foreign = fo.Dataset(final_name, persistent=True)
+            foreign.info["owner"] = "foreign-promotion-racer"
+            foreign.save()
+            raise RuntimeError("promotion lost name race")
+        real_rename(dataset, name)
+
+    monkeypatch.setattr(
+        final_snapshot,
+        "_rename_dataset",
+        foreign_claim_then_fail,
+    )
+
+    with pytest.raises(
+        SnapshotReplacementError,
+        match="foreign dataset occupies final name.*old dataset remains",
+    ):
+        create_snapshot(
+            [_validated_record(tmp_path)],
+            final_name,
+            temporary_name,
+            replace_existing=True,
+        )
+
+    foreign_document = _database_document(final_name)
+    assert foreign_document is not None
+    assert foreign_document["info"]["owner"] == "foreign-promotion-racer"
+    backup_names = _database_names_with_prefix(f"{temporary_name}--backup-")
+    assert len(backup_names) == 1
+    backup_document = _database_document(backup_names[0])
+    assert backup_document is not None
+    assert backup_document["_id"] == original_id
+    assert backup_document["info"]["generation"] == "old"
+    assert _database_names_with_prefix(f"{temporary_name}--build-") == []
+
+    fo.delete_dataset(final_name)
+    fo.delete_dataset(backup_names[0])
 
 
 def test_transactional_replacement_rollback_failure_keeps_owned_backup(

@@ -295,7 +295,7 @@ def test_create_snapshot_is_atomic_and_complete(
     assert "test_final_snapshot__building" not in fo.list_datasets()
 ```
 
-Also force validation failure and assert neither final nor temporary dataset remains.
+Also force validation failure and assert neither final nor owned staging dataset remains. Add adversarial real-database cases for generated staging-name collisions, constructor races, and rename exceptions both before and after persistence. Assert cleanup occurs only when the generated dataset ID and unguessable metadata token prove ownership; an unproven post-metadata constructor artifact must be retained and reported rather than deleted.
 
 - [ ] **Step 2: Run the integration test and verify RED**
 
@@ -325,7 +325,7 @@ sample["lineage_status"] = record.enrichment.status
 sample["lineage_match_method"] = record.enrichment.match_method
 ```
 
-Define all approved sample fields before batched insertion, populate integrity and enrichment fields, create eight saved views, validate count and identity agreement, set `persistent = True`, and rename the temporary dataset only after validation. Delete only the temporary dataset inside an exception handler.
+Define all approved sample fields before batched insertion, populate integrity and enrichment fields, create eight saved views, validate count and identity agreement, set `persistent = True`, and rename the temporary dataset only after validation. Explicitly collision-check the generated build name, persist an unguessable ownership token in dataset metadata, and require a database ID/token match before cleanup. Re-query database state after rename exceptions instead of trusting the mutable in-memory dataset name.
 
 - [ ] **Step 4: Run the integration test and verify GREEN**
 
