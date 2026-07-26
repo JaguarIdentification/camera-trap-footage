@@ -839,6 +839,45 @@ def test_overwrite_promotion_failure_restores_existing_target(
     assert not list(tmp_path.glob(".target.backup-*"))
 
 
+def test_overwrite_promotion_collision_preserves_claimant_and_old_target(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = _write_source_export(tmp_path)
+    target = tmp_path / "target"
+    target.mkdir()
+    sentinel = target / "existing.txt"
+    sentinel.write_text("recover me", encoding="utf-8")
+    plan = build_curation_plan(source, target, policy=_fixture_policy())
+    real_replace = final_curation.os.replace
+
+    def collide_at_promotion(source_path: Path, target_path: Path) -> None:
+        if Path(source_path).name.startswith(".target.building-") and Path(target_path) == target:
+            target.mkdir()
+            (target / "claimant.txt").write_text(
+                "concurrent claimant",
+                encoding="utf-8",
+            )
+            raise OSError("injected claimant collision")
+        real_replace(source_path, target_path)
+
+    monkeypatch.setattr(final_curation.os, "replace", collide_at_promotion)
+
+    with pytest.raises(
+        CurationError,
+        match=r"concurrent target.*preserved.*\.target\.recovery-",
+    ):
+        materialize_curated_export(plan, overwrite=True, confirmed=True)
+
+    assert (target / "claimant.txt").read_text(encoding="utf-8") == ("concurrent claimant")
+    recoveries = list(tmp_path.glob(".target.recovery-*"))
+    assert len(recoveries) == 1
+    assert (recoveries[0] / "existing.txt").read_text(encoding="utf-8") == ("recover me")
+    assert not list(tmp_path.glob(".target.building-*"))
+    assert not list(tmp_path.glob(".target.backup-*"))
+    assert not (tmp_path / ".target.lock").exists()
+
+
 def test_materialization_rejects_a_target_that_contains_the_source(
     tmp_path: Path,
 ) -> None:

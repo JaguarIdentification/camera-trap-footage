@@ -948,8 +948,18 @@ def materialize_curated_export(
             try:
                 os.replace(staging, target)
             except BaseException as exc:
+                if target.is_symlink() or target.exists():
+                    preserved_at = _preserve_unexpected_backup(target, backup)
+                    if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+                        raise
+                    raise CurationError(
+                        "could not publish curated export because a concurrent "
+                        "target appeared; the concurrent target was preserved "
+                        "and the previous target is recoverable at "
+                        f"{preserved_at}"
+                    ) from exc
                 try:
-                    if not target.is_symlink() and not target.exists() and backup.exists():
+                    if backup.exists():
                         os.replace(backup, target)
                 except OSError as restore_error:
                     raise CurationError(
