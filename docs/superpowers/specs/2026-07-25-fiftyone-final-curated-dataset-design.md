@@ -67,9 +67,14 @@ requires `--yes`, and piped text is never accepted as confirmation. A lexical
 target that is itself a symlink or has an unsafe ancestor/descendant
 relationship with the source is rejected before staging or removal.
 Materialization holds an exclusively created sibling lock through staging and
-publication. It pins whether the target was absent or, for a confirmed
-replacement, its canonical path, directory device/inode, report digest, and
-source identity. The exact state is rechecked immediately before rename. A
+publication. The CLI pins an existing target before asking for confirmation
+and passes that exact expected state into materialization. The pin records
+whether the target was absent or, for a confirmed replacement, its canonical
+path, directory device/inode, report digest, and source identity. The exact
+state is rechecked immediately before rename. After the target is renamed to
+backup, the backup identity is checked again before promotion or deletion. An
+unexpected backup is restored when the target remains absent or retained
+under an explicit recovery name when restoration would collide. A
 concurrently created or changed target is preserved, only the owned staging
 directory is removed, and lock cleanup never unlinks a foreign replacement.
 Replacement keeps the old target recoverable until the new directory is

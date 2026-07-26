@@ -74,7 +74,10 @@ removed and explicit pending-review fields/tag.
 7. Hold an exclusive sibling lock across staging and publication. Pin absent
    targets or the canonical path, directory device/inode, report digest, and
    source identity of a confirmed existing target; recheck immediately before
-   rename and preserve any concurrent target or replacement.
+   rename and preserve any concurrent target or replacement. Capture an
+   existing-target pin before prompting and pass it into materialization.
+   Verify the backup identity after rename and before promotion/deletion;
+   restore or retain an unexpected backup under an explicit recovery name.
 
 ## Task 3: Pending-review parser and validator contract
 

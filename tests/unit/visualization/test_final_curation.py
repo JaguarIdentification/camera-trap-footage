@@ -588,6 +588,106 @@ def test_materialization_preserves_replacement_of_confirmed_target(
     assert not (tmp_path / ".target.lock").exists()
 
 
+def test_materialization_verifies_backup_identity_after_final_recheck(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = _write_source_export(tmp_path)
+    target = tmp_path / "target"
+    target.mkdir()
+    (target / "original.txt").write_text("confirmed target", encoding="utf-8")
+    displaced = tmp_path / "confirmed-target-displaced"
+    plan = build_curation_plan(source, target, policy=_fixture_policy())
+    real_replace = final_curation.os.replace
+    injected = False
+
+    def replace_target_between_check_and_rename(
+        source_path: Path,
+        target_path: Path,
+    ) -> None:
+        nonlocal injected
+        if not injected and source_path == target and target_path.name.startswith(".target.backup-"):
+            injected = True
+            real_replace(target, displaced)
+            target.mkdir()
+            (target / "foreign.txt").write_text("must survive", encoding="utf-8")
+            real_replace(target, target_path)
+            return
+        real_replace(source_path, target_path)
+
+    monkeypatch.setattr(
+        final_curation.os,
+        "replace",
+        replace_target_between_check_and_rename,
+    )
+
+    with pytest.raises(CurationError, match="backup identity"):
+        materialize_curated_export(
+            plan,
+            overwrite=True,
+            confirmed=True,
+        )
+
+    assert injected is True
+    assert (target / "foreign.txt").read_text(encoding="utf-8") == "must survive"
+    assert (displaced / "original.txt").read_text(encoding="utf-8") == "confirmed target"
+    assert not list(tmp_path.glob(".target.backup-*"))
+    assert not list(tmp_path.glob(".target.recovery-*"))
+    assert not list(tmp_path.glob(".target.building-*"))
+
+
+def test_materialization_retains_unexpected_backup_when_restore_target_collides(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = _write_source_export(tmp_path)
+    target = tmp_path / "target"
+    target.mkdir()
+    (target / "original.txt").write_text("confirmed target", encoding="utf-8")
+    displaced = tmp_path / "confirmed-target-displaced"
+    plan = build_curation_plan(source, target, policy=_fixture_policy())
+    real_replace = final_curation.os.replace
+    injected = False
+
+    def replace_target_and_create_restore_collision(
+        source_path: Path,
+        target_path: Path,
+    ) -> None:
+        nonlocal injected
+        if not injected and source_path == target and target_path.name.startswith(".target.backup-"):
+            injected = True
+            real_replace(target, displaced)
+            target.mkdir()
+            (target / "foreign.txt").write_text("recover me", encoding="utf-8")
+            real_replace(target, target_path)
+            target.mkdir()
+            (target / "collision.txt").write_text("do not replace", encoding="utf-8")
+            return
+        real_replace(source_path, target_path)
+
+    monkeypatch.setattr(
+        final_curation.os,
+        "replace",
+        replace_target_and_create_restore_collision,
+    )
+
+    with pytest.raises(CurationError, match="backup identity"):
+        materialize_curated_export(
+            plan,
+            overwrite=True,
+            confirmed=True,
+        )
+
+    recoveries = list(tmp_path.glob(".target.recovery-*"))
+    assert injected is True
+    assert (target / "collision.txt").read_text(encoding="utf-8") == "do not replace"
+    assert len(recoveries) == 1
+    assert (recoveries[0] / "foreign.txt").read_text(encoding="utf-8") == "recover me"
+    assert (displaced / "original.txt").read_text(encoding="utf-8") == "confirmed target"
+    assert not list(tmp_path.glob(".target.backup-*"))
+    assert not list(tmp_path.glob(".target.building-*"))
+
+
 def test_materialization_pins_existing_curation_report_identity(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -946,3 +1046,44 @@ def test_curation_cli_noninteractive_overwrite_requires_yes_even_with_exact_inpu
     assert exit_code == 0
     assert not sentinel.exists()
     assert (target / "curation_report.json").is_file()
+
+
+def test_curation_cli_pins_target_before_interactive_confirmation(
+    tmp_path: Path,
+) -> None:
+    source = _write_source_export(tmp_path)
+    target = tmp_path / "target"
+    target.mkdir()
+    (target / "original.txt").write_text("confirmed target", encoding="utf-8")
+    displaced = tmp_path / "confirmed-target-displaced"
+    args = parse_args(
+        [
+            "--create",
+            "--overwrite",
+            "--source",
+            str(source),
+            "--target",
+            str(target),
+        ]
+    )
+
+    def replace_during_prompt(_prompt: str) -> str:
+        final_curation.os.replace(target, displaced)
+        target.mkdir()
+        (target / "foreign.txt").write_text("must survive", encoding="utf-8")
+        return str(target.resolve())
+
+    with pytest.raises(CurationError, match="target changed"):
+        run(
+            args,
+            policy=_fixture_policy(),
+            input_fn=replace_during_prompt,
+            isatty_fn=lambda: True,
+            output_fn=lambda _message: None,
+        )
+
+    assert (target / "foreign.txt").read_text(encoding="utf-8") == "must survive"
+    assert (displaced / "original.txt").read_text(encoding="utf-8") == "confirmed target"
+    assert not list(tmp_path.glob(".target.building-*"))
+    assert not list(tmp_path.glob(".target.backup-*"))
+    assert not (tmp_path / ".target.lock").exists()

@@ -171,7 +171,7 @@ class CurationPlan:
 
 
 @dataclass(frozen=True)
-class _TargetState:
+class ExpectedTargetState:
     exists: bool
     canonical_path: Path | None = None
     device: int | None = None
@@ -702,11 +702,11 @@ def _target_report_identity(
     )
 
 
-def _capture_target_state(target: Path) -> _TargetState:
+def _capture_target_state(target: Path) -> ExpectedTargetState:
     try:
         initial_stat = target.lstat()
     except FileNotFoundError:
-        return _TargetState(exists=False)
+        return ExpectedTargetState(exists=False)
     except OSError as exc:
         raise CurationError(f"could not inspect target export {target}: {exc}") from exc
     if stat.S_ISLNK(initial_stat.st_mode):
@@ -734,7 +734,7 @@ def _capture_target_state(target: Path) -> _TargetState:
     )
     if initial_identity != final_identity:
         raise CurationError(f"target changed during state capture: {target}")
-    return _TargetState(
+    return ExpectedTargetState(
         exists=True,
         canonical_path=canonical_path,
         device=final_stat.st_dev,
@@ -747,7 +747,7 @@ def _capture_target_state(target: Path) -> _TargetState:
 
 def _require_unchanged_target(
     target: Path,
-    expected: _TargetState,
+    expected: ExpectedTargetState,
 ) -> None:
     try:
         actual = _capture_target_state(target)
@@ -755,6 +755,44 @@ def _require_unchanged_target(
         raise CurationError(f"target changed during materialization: {target}: {exc}") from exc
     if actual != expected:
         raise CurationError("target changed during materialization; concurrent target was " f"preserved: {target}")
+
+
+def _same_pinned_identity(
+    expected: ExpectedTargetState,
+    actual: ExpectedTargetState,
+) -> bool:
+    return (
+        expected.exists
+        and actual.exists
+        and expected.device == actual.device
+        and expected.inode == actual.inode
+        and expected.report_sha256 == actual.report_sha256
+        and expected.report_source_export == actual.report_source_export
+        and expected.report_source_samples_sha256 == actual.report_source_samples_sha256
+    )
+
+
+def _preserve_unexpected_backup(
+    target: Path,
+    backup: Path,
+) -> Path:
+    target_occupied = target.is_symlink() or target.exists()
+    if not target_occupied:
+        try:
+            os.replace(backup, target)
+        except OSError:
+            pass
+        else:
+            return target
+
+    recovery = target.parent / f".{target.name}.recovery-{uuid4().hex}"
+    try:
+        os.replace(backup, recovery)
+    except OSError as exc:
+        raise CurationError(
+            "backup identity did not match the confirmed target and could not " f"be restored or moved; preserve it manually at {backup}: {exc}"
+        ) from exc
+    return recovery
 
 
 @contextmanager
@@ -814,6 +852,7 @@ def materialize_curated_export(
     *,
     overwrite: bool = False,
     confirmed: bool = False,
+    expected_target_state: ExpectedTargetState | None = None,
 ) -> Path:
     """Atomically materialize metadata that references original source media."""
     target = plan.target_dir
@@ -831,7 +870,11 @@ def materialize_curated_export(
     if plan.source_dir.is_relative_to(current_resolved_target):
         raise CurationError("target export must not contain the source export")
 
-    initial_target_state = _capture_target_state(target)
+    if expected_target_state is None:
+        initial_target_state = _capture_target_state(target)
+    else:
+        _require_unchanged_target(target, expected_target_state)
+        initial_target_state = expected_target_state
     if initial_target_state.exists and initial_target_state.canonical_path != plan.resolved_target_dir:
         raise CurationError("target export resolution changed after planning: " f"{target} -> {initial_target_state.canonical_path}")
 
@@ -871,10 +914,42 @@ def materialize_curated_export(
             except OSError as exc:
                 raise CurationError(f"could not preserve existing target before publication: " f"{target}: {exc}") from exc
             try:
+                backup_state = _capture_target_state(backup)
+            except CurationError as exc:
+                preserved_at = _preserve_unexpected_backup(target, backup)
+                raise CurationError(
+                    "backup identity could not be verified against the "
+                    "confirmed target; publication aborted and the unexpected "
+                    f"entry was preserved at {preserved_at}"
+                ) from exc
+            if not _same_pinned_identity(preflight, backup_state):
+                preserved_at = _preserve_unexpected_backup(target, backup)
+                raise CurationError(
+                    "backup identity did not match the confirmed target; "
+                    "publication aborted and the unexpected directory was "
+                    f"preserved at {preserved_at}"
+                )
+            try:
+                post_backup_target = _capture_target_state(target)
+            except CurationError as exc:
+                preserved_at = _preserve_unexpected_backup(target, backup)
+                raise CurationError(
+                    "target changed after the confirmed target was backed up; "
+                    "publication aborted and the confirmed backup was "
+                    f"preserved at {preserved_at}"
+                ) from exc
+            if post_backup_target.exists:
+                preserved_at = _preserve_unexpected_backup(target, backup)
+                raise CurationError(
+                    "target changed after the confirmed target was backed up; "
+                    "publication aborted and the confirmed backup was "
+                    f"preserved at {preserved_at}"
+                )
+            try:
                 os.replace(staging, target)
             except BaseException as exc:
                 try:
-                    if not target.exists() and backup.exists():
+                    if not target.is_symlink() and not target.exists() and backup.exists():
                         os.replace(backup, target)
                 except OSError as restore_error:
                     raise CurationError(
@@ -883,6 +958,9 @@ def materialize_curated_export(
                 if isinstance(exc, (KeyboardInterrupt, SystemExit)):
                     raise
                 raise CurationError("could not publish curated export; previous target was " "restored") from exc
+            backup_before_delete = _capture_target_state(backup)
+            if not _same_pinned_identity(preflight, backup_before_delete):
+                raise CurationError("curated export was published but backup identity changed; " f"the unexpected backup was retained at {backup}")
             try:
                 shutil.rmtree(backup)
             except OSError as exc:
@@ -981,8 +1059,9 @@ def run(
         output_fn(json.dumps(_report_payload(plan), indent=2, sort_keys=True))
         return 0
 
+    expected_target_state = _capture_target_state(plan.target_dir)
     confirmed = args.yes
-    if plan.target_dir.exists() and args.overwrite and not confirmed:
+    if expected_target_state.exists and args.overwrite and not confirmed:
         isatty = sys.stdin.isatty if isatty_fn is None else isatty_fn
         if not isatty():
             raise CurationError("noninteractive overwrite requires --yes")
@@ -998,6 +1077,7 @@ def run(
         plan,
         overwrite=args.overwrite,
         confirmed=confirmed,
+        expected_target_state=expected_target_state,
     )
     output_fn(json.dumps(_report_payload(plan), indent=2, sort_keys=True))
     return 0
