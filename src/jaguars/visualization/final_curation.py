@@ -1,6 +1,8 @@
 """Deterministic construction of the final curated terminal export."""
 
 import argparse
+import ctypes
+import errno
 import hashlib
 import json
 import os
@@ -51,6 +53,9 @@ DEFAULT_MANIFEST_PATHS = (
 )
 POLICY_VERSION = "final-curated-v1"
 NEEDS_REVIEW_TAG = "needs_annotation_review"
+_LINUX_AT_FDCWD = -100
+_RENAME_EXCL = 0x00000004
+_RENAME_NOREPLACE = 1
 
 
 @dataclass(frozen=True)
@@ -779,20 +784,66 @@ def _preserve_unexpected_backup(
     target_occupied = target.is_symlink() or target.exists()
     if not target_occupied:
         try:
-            os.replace(backup, target)
-        except OSError:
+            _rename_directory_noreplace(backup, target)
+        except (CurationError, OSError):
             pass
         else:
             return target
 
     recovery = target.parent / f".{target.name}.recovery-{uuid4().hex}"
     try:
-        os.replace(backup, recovery)
-    except OSError as exc:
-        raise CurationError(
-            "backup identity did not match the confirmed target and could not " f"be restored or moved; preserve it manually at {backup}: {exc}"
-        ) from exc
+        _rename_directory_noreplace(backup, recovery)
+    except (CurationError, OSError) as exc:
+        raise CurationError("could not restore or move the preserved target; " f"recover it manually from {backup}: {exc}") from exc
     return recovery
+
+
+def _rename_directory_noreplace(source: Path, target: Path) -> None:
+    """Atomically rename a directory while refusing to replace any target."""
+    if sys.platform == "darwin":
+        libc = ctypes.CDLL(None, use_errno=True)
+        renamex_np = libc.renamex_np
+        renamex_np.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint]
+        renamex_np.restype = ctypes.c_int
+        result = renamex_np(
+            os.fsencode(source),
+            os.fsencode(target),
+            _RENAME_EXCL,
+        )
+    elif sys.platform.startswith("linux"):
+        libc = ctypes.CDLL(None, use_errno=True)
+        try:
+            renameat2 = libc.renameat2
+        except AttributeError as exc:
+            raise CurationError("atomic no-clobber directory publication is unavailable on " "this Linux system") from exc
+        renameat2.argtypes = [
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_uint,
+        ]
+        renameat2.restype = ctypes.c_int
+        result = renameat2(
+            _LINUX_AT_FDCWD,
+            os.fsencode(source),
+            _LINUX_AT_FDCWD,
+            os.fsencode(target),
+            _RENAME_NOREPLACE,
+        )
+    elif os.name == "nt":
+        os.rename(source, target)
+        return
+    else:
+        raise CurationError("atomic no-clobber directory publication is unsupported on " f"platform {sys.platform!r}")
+
+    if result != 0:
+        error_number = ctypes.get_errno()
+        raise OSError(
+            error_number,
+            os.strerror(error_number),
+            str(target),
+        )
 
 
 @contextmanager
@@ -902,8 +953,12 @@ def materialize_curated_export(
             if not preflight.exists:
                 _require_unchanged_target(target, preflight)
                 try:
-                    os.replace(staging, target)
+                    _rename_directory_noreplace(staging, target)
                 except OSError as exc:
+                    if exc.errno in (errno.EEXIST, errno.ENOTEMPTY):
+                        raise CurationError(
+                            "could not publish curated export because a " f"concurrent target appeared and was preserved: {target}"
+                        ) from exc
                     raise CurationError(f"could not publish curated export to {target}: {exc}") from exc
                 return target
 
@@ -946,28 +1001,19 @@ def materialize_curated_export(
                     f"preserved at {preserved_at}"
                 )
             try:
-                os.replace(staging, target)
+                _rename_directory_noreplace(staging, target)
             except BaseException as exc:
-                if target.is_symlink() or target.exists():
-                    preserved_at = _preserve_unexpected_backup(target, backup)
-                    if isinstance(exc, (KeyboardInterrupt, SystemExit)):
-                        raise
-                    raise CurationError(
-                        "could not publish curated export because a concurrent "
-                        "target appeared; the concurrent target was preserved "
-                        "and the previous target is recoverable at "
-                        f"{preserved_at}"
-                    ) from exc
-                try:
-                    if backup.exists():
-                        os.replace(backup, target)
-                except OSError as restore_error:
-                    raise CurationError(
-                        "could not publish curated export or restore the " f"previous target; recoverable backup remains at {backup}"
-                    ) from restore_error
+                preserved_at = _preserve_unexpected_backup(target, backup)
                 if isinstance(exc, (KeyboardInterrupt, SystemExit)):
                     raise
-                raise CurationError("could not publish curated export; previous target was " "restored") from exc
+                if preserved_at == target:
+                    raise CurationError("could not publish curated export; previous target was restored") from exc
+                raise CurationError(
+                    "could not publish curated export because a concurrent "
+                    "target appeared; the concurrent target was preserved "
+                    "and the previous target is recoverable at "
+                    f"{preserved_at}"
+                ) from exc
             backup_before_delete = _capture_target_state(backup)
             if not _same_pinned_identity(preflight, backup_before_delete):
                 raise CurationError("curated export was published but backup identity changed; " f"the unexpected backup was retained at {backup}")

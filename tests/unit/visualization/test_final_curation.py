@@ -783,6 +783,59 @@ def test_materialization_cleanup_never_removes_replacement_lock(
     assert not list(tmp_path.glob(".target.building-*"))
 
 
+@pytest.mark.skipif(
+    final_curation.sys.platform != "darwin",
+    reason="exercises macOS renamex_np(RENAME_EXCL)",
+)
+def test_macos_publication_atomically_preserves_empty_claimant(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = _write_source_export(tmp_path)
+    target = tmp_path / "target"
+    plan = build_curation_plan(source, target, policy=_fixture_policy())
+    real_rename_noreplace = final_curation._rename_directory_noreplace
+    claimant_inode: int | None = None
+
+    def claim_then_publish(source_path: Path, target_path: Path) -> None:
+        nonlocal claimant_inode
+        target.mkdir()
+        claimant_inode = target.stat().st_ino
+        real_rename_noreplace(source_path, target_path)
+
+    monkeypatch.setattr(
+        final_curation,
+        "_rename_directory_noreplace",
+        claim_then_publish,
+    )
+
+    with pytest.raises(CurationError, match="concurrent target.*preserved"):
+        materialize_curated_export(plan)
+
+    assert claimant_inode is not None
+    assert target.stat().st_ino == claimant_inode
+    assert list(target.iterdir()) == []
+    assert not (target / "curation_report.json").exists()
+    assert not list(tmp_path.glob(".target.building-*"))
+    assert not (tmp_path / ".target.lock").exists()
+
+
+def test_atomic_publication_fails_closed_on_unsupported_platform(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "source"
+    target = tmp_path / "target"
+    source.mkdir()
+    monkeypatch.setattr(final_curation.sys, "platform", "unsupported")
+
+    with pytest.raises(CurationError, match="unsupported"):
+        final_curation._rename_directory_noreplace(source, target)
+
+    assert source.is_dir()
+    assert not target.exists()
+
+
 def test_materialization_requires_explicit_confirmed_overwrite_and_replaces_atomically(
     tmp_path: Path,
 ) -> None:
@@ -819,17 +872,18 @@ def test_overwrite_promotion_failure_restores_existing_target(
     sentinel = target / "existing.txt"
     sentinel.write_text("recover me", encoding="utf-8")
     plan = build_curation_plan(source, target, policy=_fixture_policy())
-    real_replace = final_curation.os.replace
-    calls = 0
+    real_rename_noreplace = final_curation._rename_directory_noreplace
 
     def fail_promotion(source_path: Path, target_path: Path) -> None:
-        nonlocal calls
-        calls += 1
-        if calls == 2:
+        if source_path.name.startswith(".target.building-"):
             raise OSError("injected promotion failure")
-        real_replace(source_path, target_path)
+        real_rename_noreplace(source_path, target_path)
 
-    monkeypatch.setattr(final_curation.os, "replace", fail_promotion)
+    monkeypatch.setattr(
+        final_curation,
+        "_rename_directory_noreplace",
+        fail_promotion,
+    )
 
     with pytest.raises(CurationError, match="publish"):
         materialize_curated_export(plan, overwrite=True, confirmed=True)
@@ -849,19 +903,21 @@ def test_overwrite_promotion_collision_preserves_claimant_and_old_target(
     sentinel = target / "existing.txt"
     sentinel.write_text("recover me", encoding="utf-8")
     plan = build_curation_plan(source, target, policy=_fixture_policy())
-    real_replace = final_curation.os.replace
+    real_rename_noreplace = final_curation._rename_directory_noreplace
+    claimant_inode: int | None = None
 
     def collide_at_promotion(source_path: Path, target_path: Path) -> None:
-        if Path(source_path).name.startswith(".target.building-") and Path(target_path) == target:
+        nonlocal claimant_inode
+        if source_path.name.startswith(".target.building-"):
             target.mkdir()
-            (target / "claimant.txt").write_text(
-                "concurrent claimant",
-                encoding="utf-8",
-            )
-            raise OSError("injected claimant collision")
-        real_replace(source_path, target_path)
+            claimant_inode = target.stat().st_ino
+        real_rename_noreplace(source_path, target_path)
 
-    monkeypatch.setattr(final_curation.os, "replace", collide_at_promotion)
+    monkeypatch.setattr(
+        final_curation,
+        "_rename_directory_noreplace",
+        collide_at_promotion,
+    )
 
     with pytest.raises(
         CurationError,
@@ -869,7 +925,9 @@ def test_overwrite_promotion_collision_preserves_claimant_and_old_target(
     ):
         materialize_curated_export(plan, overwrite=True, confirmed=True)
 
-    assert (target / "claimant.txt").read_text(encoding="utf-8") == ("concurrent claimant")
+    assert claimant_inode is not None
+    assert target.stat().st_ino == claimant_inode
+    assert list(target.iterdir()) == []
     recoveries = list(tmp_path.glob(".target.recovery-*"))
     assert len(recoveries) == 1
     assert (recoveries[0] / "existing.txt").read_text(encoding="utf-8") == ("recover me")
