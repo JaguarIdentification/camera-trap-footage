@@ -35,7 +35,8 @@ from jaguars.visualization.final_validation import (
 
 DEFAULT_DATASET_NAME = "JaguarCameraTrap_Final_Curated_v1"
 DEFAULT_INTERMEDIATE_DIR = Path("data/intermediate/v1")
-DEFAULT_TERMINAL_EXPORT_DIR = DEFAULT_INTERMEDIATE_DIR / "fo_jaguars/labeled_segmented_jaguars_final_curated_v1"
+DEFAULT_STATE_ROOT = Path("/Volumes/CameraTrapPython/fiftyone")
+DEFAULT_TERMINAL_EXPORT_DIR = DEFAULT_STATE_ROOT / "exports" / DEFAULT_DATASET_NAME
 DEFAULT_ORIGINAL_MEDIA_ROOT = DEFAULT_INTERMEDIATE_DIR / "fo_jaguars/labeled_segmented_jaguars_primitive/data"
 DEFAULT_UPSTREAM_EXPORT_DIRS = (
     DEFAULT_INTERMEDIATE_DIR / "fo_jaguars/exports/segmented_deduplicated",
@@ -47,7 +48,6 @@ DEFAULT_MANIFEST_PATHS = (
     DEFAULT_INTERMEDIATE_DIR / "labels_with_splits.csv",
     DEFAULT_INTERMEDIATE_DIR / "pptx_extracted_labels_with_splits.csv",
 )
-DEFAULT_STATE_ROOT = Path("/Volumes/CameraTrapPython/fiftyone")
 DEFAULT_DATABASE_DIR = DEFAULT_STATE_ROOT / "var/lib/mongo"
 DEFAULT_REPORT_DIR = DEFAULT_STATE_ROOT / DEFAULT_DATASET_NAME
 DEFAULT_DATASET_DIR = DEFAULT_STATE_ROOT / "datasets"

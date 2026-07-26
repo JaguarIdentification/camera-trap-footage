@@ -75,7 +75,7 @@ def test_cli_and_runtime_defaults_are_the_approved_final_snapshot_values() -> No
         DEFAULT_PORT,
     )
     assert paths.terminal_export_dir == DEFAULT_TERMINAL_EXPORT_DIR
-    assert paths.terminal_export_dir.name == "labeled_segmented_jaguars_final_curated_v1"
+    assert paths.terminal_export_dir == Path("/Volumes/CameraTrapPython/fiftyone/exports/" "JaguarCameraTrap_Final_Curated_v1")
     assert paths.allowed_media_root == DEFAULT_ORIGINAL_MEDIA_ROOT
     assert EXPECTED_SAMPLE_COUNT == 1322
     assert EXPECTED_TERMINAL_IDENTITY_POPULATED == 1108

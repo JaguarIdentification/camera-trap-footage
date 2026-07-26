@@ -1,4 +1,5 @@
 import json
+import os
 from dataclasses import replace
 from pathlib import Path
 from types import MappingProxyType
@@ -28,6 +29,36 @@ from jaguars.visualization.final_records import (
     load_terminal_records,
 )
 from jaguars.visualization.final_validation import validate_records
+
+
+@pytest.fixture(autouse=True)
+def _allow_isolated_target_storage(
+    monkeypatch: pytest.MonkeyPatch,
+    request: pytest.FixtureRequest,
+) -> None:
+    """Keep synthetic materialization tests independent of production mounts."""
+    if request.node.name.startswith("test_target_storage_"):
+        return
+
+    def validate_isolated_target(target: Path) -> object:
+        resolved_target = target.resolve(strict=False)
+        mount_path = resolved_target.parent
+        while not mount_path.exists():
+            mount_path = mount_path.parent
+        mount_identity = final_curation._capture_directory_identity(mount_path)
+        assert mount_identity is not None
+        return final_curation._ValidatedTargetStorage(
+            mount_path=mount_path,
+            target_path=resolved_target,
+            mount_identity=mount_identity,
+            is_mount_fn=lambda _path: True,
+        )
+
+    monkeypatch.setattr(
+        final_curation,
+        "_validate_target_storage",
+        validate_isolated_target,
+    )
 
 
 def _annotation(
@@ -389,6 +420,9 @@ def test_materialization_references_original_media_and_writes_metadata_only(
         "samples.json",
     }
     assert not (target / "data").exists()
+    released_locks = list(tmp_path.glob(".target.released-lock-*"))
+    assert len(released_locks) == 1
+    assert released_locks[0].is_file()
 
     payload = json.loads((target / "samples.json").read_text(encoding="utf-8"))
     samples = {Path(sample["filepath"]).name: sample for sample in payload["samples"]}
@@ -491,6 +525,13 @@ def test_materialization_validates_staging_before_promotion(
 
     assert not target.exists()
     assert not list(tmp_path.glob(".target.building-*"))
+    retired_staging = list(tmp_path.glob(".target.retired-staging-*"))
+    assert len(retired_staging) == 1
+    assert {path.name for path in retired_staging[0].iterdir()} == {
+        "curation_report.json",
+        "metadata.json",
+        "samples.json",
+    }
 
 
 def test_materialization_rejects_media_drift_after_planning(
@@ -598,26 +639,28 @@ def test_materialization_verifies_backup_identity_after_final_recheck(
     (target / "original.txt").write_text("confirmed target", encoding="utf-8")
     displaced = tmp_path / "confirmed-target-displaced"
     plan = build_curation_plan(source, target, policy=_fixture_policy())
+    real_rename_at = final_curation._rename_directory_noreplace_at
     real_replace = final_curation.os.replace
     injected = False
 
     def replace_target_between_check_and_rename(
-        source_path: Path,
-        target_path: Path,
+        parent_fd: int,
+        source_name: str,
+        target_name: str,
     ) -> None:
         nonlocal injected
-        if not injected and source_path == target and target_path.name.startswith(".target.backup-"):
+        if not injected and source_name == target.name and target_name.startswith(".target.backup-"):
             injected = True
             real_replace(target, displaced)
             target.mkdir()
             (target / "foreign.txt").write_text("must survive", encoding="utf-8")
-            real_replace(target, target_path)
+            real_replace(target, target.parent / target_name)
             return
-        real_replace(source_path, target_path)
+        real_rename_at(parent_fd, source_name, target_name)
 
     monkeypatch.setattr(
-        final_curation.os,
-        "replace",
+        final_curation,
+        "_rename_directory_noreplace_at",
         replace_target_between_check_and_rename,
     )
 
@@ -646,28 +689,30 @@ def test_materialization_retains_unexpected_backup_when_restore_target_collides(
     (target / "original.txt").write_text("confirmed target", encoding="utf-8")
     displaced = tmp_path / "confirmed-target-displaced"
     plan = build_curation_plan(source, target, policy=_fixture_policy())
+    real_rename_at = final_curation._rename_directory_noreplace_at
     real_replace = final_curation.os.replace
     injected = False
 
     def replace_target_and_create_restore_collision(
-        source_path: Path,
-        target_path: Path,
+        parent_fd: int,
+        source_name: str,
+        target_name: str,
     ) -> None:
         nonlocal injected
-        if not injected and source_path == target and target_path.name.startswith(".target.backup-"):
+        if not injected and source_name == target.name and target_name.startswith(".target.backup-"):
             injected = True
             real_replace(target, displaced)
             target.mkdir()
             (target / "foreign.txt").write_text("recover me", encoding="utf-8")
-            real_replace(target, target_path)
+            real_replace(target, target.parent / target_name)
             target.mkdir()
             (target / "collision.txt").write_text("do not replace", encoding="utf-8")
             return
-        real_replace(source_path, target_path)
+        real_rename_at(parent_fd, source_name, target_name)
 
     monkeypatch.setattr(
-        final_curation.os,
-        "replace",
+        final_curation,
+        "_rename_directory_noreplace_at",
         replace_target_and_create_restore_collision,
     )
 
@@ -794,18 +839,23 @@ def test_macos_publication_atomically_preserves_empty_claimant(
     source = _write_source_export(tmp_path)
     target = tmp_path / "target"
     plan = build_curation_plan(source, target, policy=_fixture_policy())
-    real_rename_noreplace = final_curation._rename_directory_noreplace
+    real_rename_noreplace = final_curation._rename_directory_noreplace_at
     claimant_inode: int | None = None
 
-    def claim_then_publish(source_path: Path, target_path: Path) -> None:
+    def claim_then_publish(
+        parent_fd: int,
+        source_name: str,
+        target_name: str,
+    ) -> None:
         nonlocal claimant_inode
-        target.mkdir()
-        claimant_inode = target.stat().st_ino
-        real_rename_noreplace(source_path, target_path)
+        if target_name == target.name:
+            target.mkdir()
+            claimant_inode = target.stat().st_ino
+        real_rename_noreplace(parent_fd, source_name, target_name)
 
     monkeypatch.setattr(
         final_curation,
-        "_rename_directory_noreplace",
+        "_rename_directory_noreplace_at",
         claim_then_publish,
     )
 
@@ -818,6 +868,347 @@ def test_macos_publication_atomically_preserves_empty_claimant(
     assert not (target / "curation_report.json").exists()
     assert not list(tmp_path.glob(".target.building-*"))
     assert not (tmp_path / ".target.lock").exists()
+
+
+def test_target_storage_rejects_unmounted_state_volume(tmp_path: Path) -> None:
+    mount_root = tmp_path / "CameraTrapPython"
+    approved_root = mount_root / "fiftyone/exports"
+    target = approved_root / "curated"
+
+    with pytest.raises(CurationError, match="mounted filesystem"):
+        final_curation._validate_target_storage(
+            target,
+            mount_root=mount_root,
+            approved_root=approved_root,
+            is_mount_fn=lambda _path: False,
+            capability_probe=lambda _path: True,
+        )
+
+
+def test_target_storage_requires_absolute_target(tmp_path: Path) -> None:
+    mount_root = tmp_path / "CameraTrapPython"
+    mount_root.mkdir()
+    approved_root = mount_root / "fiftyone/exports"
+
+    with pytest.raises(CurationError, match="absolute path"):
+        final_curation._validate_target_storage(
+            Path("relative-curated-target"),
+            mount_root=mount_root,
+            approved_root=approved_root,
+            is_mount_fn=lambda _path: True,
+            capability_probe=lambda _path: True,
+        )
+
+
+@pytest.mark.parametrize(
+    ("capabilities", "valid", "expected"),
+    [
+        (0x00080000, 0x00080000, True),
+        (0x00000000, 0x00080000, False),
+        (0x00080000, 0x00000000, False),
+    ],
+)
+def test_target_storage_requires_valid_exclusive_rename_capability_bit(
+    capabilities: int,
+    valid: int,
+    expected: bool,
+) -> None:
+    assert final_curation._has_atomic_rename_capability(capabilities, valid) is expected
+
+
+@pytest.mark.parametrize("target_kind", ["root", "outside"])
+def test_target_storage_requires_strict_approved_root_descendant(
+    tmp_path: Path,
+    target_kind: str,
+) -> None:
+    mount_root = tmp_path / "CameraTrapPython"
+    mount_root.mkdir()
+    approved_root = mount_root / "fiftyone/exports"
+    target = approved_root if target_kind == "root" else mount_root / "foreign/curated"
+
+    with pytest.raises(CurationError, match="strict descendant"):
+        final_curation._validate_target_storage(
+            target,
+            mount_root=mount_root,
+            approved_root=approved_root,
+            is_mount_fn=lambda _path: True,
+            capability_probe=lambda _path: True,
+        )
+
+
+def test_target_storage_rejects_volume_without_atomic_noreplace(
+    tmp_path: Path,
+) -> None:
+    mount_root = tmp_path / "CameraTrapPython"
+    mount_root.mkdir()
+    approved_root = mount_root / "fiftyone/exports"
+    target = approved_root / "curated"
+
+    with pytest.raises(CurationError, match="atomic no-clobber"):
+        final_curation._validate_target_storage(
+            target,
+            mount_root=mount_root,
+            approved_root=approved_root,
+            is_mount_fn=lambda _path: True,
+            capability_probe=lambda _path: False,
+        )
+
+
+def test_target_storage_accepts_capable_approved_volume(tmp_path: Path) -> None:
+    mount_root = tmp_path / "CameraTrapPython"
+    approved_root = mount_root / "fiftyone/exports"
+    target = approved_root / "curated"
+    approved_root.mkdir(parents=True)
+
+    final_curation._validate_target_storage(
+        target,
+        mount_root=mount_root,
+        approved_root=approved_root,
+        is_mount_fn=lambda _path: True,
+        capability_probe=lambda _path: True,
+    )
+
+
+def test_target_storage_probes_deepest_existing_target_ancestor(
+    tmp_path: Path,
+) -> None:
+    mount_root = tmp_path / "CameraTrapPython"
+    approved_root = mount_root / "fiftyone/exports"
+    deepest_existing = approved_root / "nested"
+    deepest_existing.mkdir(parents=True)
+    target = deepest_existing / "missing/curated"
+    probed: list[Path] = []
+
+    final_curation._validate_target_storage(
+        target,
+        mount_root=mount_root,
+        approved_root=approved_root,
+        is_mount_fn=lambda _path: True,
+        capability_probe=lambda path: not probed.append(path),
+    )
+
+    assert probed == [deepest_existing.resolve()]
+
+
+def test_target_storage_rejects_nested_target_filesystem(
+    tmp_path: Path,
+) -> None:
+    mount_root = tmp_path / "CameraTrapPython"
+    approved_root = mount_root / "fiftyone/exports"
+    nested_mount = approved_root / "nested"
+    nested_mount.mkdir(parents=True)
+    target = nested_mount / "curated"
+
+    with pytest.raises(CurationError, match="same filesystem"):
+        final_curation._validate_target_storage(
+            target,
+            mount_root=mount_root,
+            approved_root=approved_root,
+            is_mount_fn=lambda _path: True,
+            capability_probe=lambda _path: True,
+            device_fn=lambda path: 2 if path == nested_mount.resolve() else 1,
+        )
+
+
+def test_target_storage_rejects_mount_replaced_during_capability_probe(
+    tmp_path: Path,
+) -> None:
+    mount_root = tmp_path / "CameraTrapPython"
+    mount_root.mkdir()
+    approved_root = mount_root / "fiftyone/exports"
+    target = approved_root / "curated"
+    displaced = tmp_path / "displaced-mount"
+
+    def replace_mount(_path: Path) -> bool:
+        mount_root.rename(displaced)
+        mount_root.mkdir()
+        return True
+
+    with pytest.raises(CurationError, match="changed during validation"):
+        final_curation._validate_target_storage(
+            target,
+            mount_root=mount_root,
+            approved_root=approved_root,
+            is_mount_fn=lambda _path: True,
+            capability_probe=replace_mount,
+        )
+
+
+def test_target_storage_ancestor_swap_cannot_redirect_first_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = _write_source_export(tmp_path)
+    mount_root = tmp_path / "CameraTrapPython"
+    approved_root = mount_root / "fiftyone/exports"
+    approved_root.mkdir(parents=True)
+    target = approved_root / "curated"
+    plan = build_curation_plan(source, target, policy=_fixture_policy())
+    displaced = tmp_path / "displaced-fiftyone"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    real_validate = final_curation._validate_target_storage
+
+    def validate_then_swap_ancestor(_target: Path) -> object:
+        validation = real_validate(
+            target,
+            mount_root=mount_root,
+            approved_root=approved_root,
+            is_mount_fn=lambda _path: True,
+            capability_probe=lambda _path: True,
+        )
+        (mount_root / "fiftyone").rename(displaced)
+        (mount_root / "fiftyone").symlink_to(
+            outside,
+            target_is_directory=True,
+        )
+        return validation
+
+    monkeypatch.setattr(
+        final_curation,
+        "_validate_target_storage",
+        validate_then_swap_ancestor,
+    )
+
+    with pytest.raises(CurationError, match="approved target parent"):
+        materialize_curated_export(plan)
+
+    assert not (outside / "exports").exists()
+    assert not list(outside.glob("**/.curated.lock"))
+    assert not list(outside.glob("**/.curated.building-*"))
+
+
+def test_target_storage_ancestor_swap_during_build_cannot_redirect_writes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = _write_source_export(tmp_path)
+    mount_root = tmp_path / "CameraTrapPython"
+    approved_root = mount_root / "fiftyone/exports"
+    approved_root.mkdir(parents=True)
+    target = approved_root / "curated"
+    plan = build_curation_plan(source, target, policy=_fixture_policy())
+    displaced = tmp_path / "displaced-fiftyone"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    real_validate = final_curation._validate_target_storage
+    real_build_at = final_curation._build_export_at
+
+    def validate_storage(_target: Path) -> object:
+        return real_validate(
+            target,
+            mount_root=mount_root,
+            approved_root=approved_root,
+            is_mount_fn=lambda _path: True,
+            capability_probe=lambda _path: True,
+        )
+
+    def swap_ancestor_then_build(
+        curation_plan: final_curation.CurationPlan,
+        descriptor: int,
+    ) -> None:
+        staging_name = final_curation._descriptor_path(descriptor).name
+        (mount_root / "fiftyone").rename(displaced)
+        (mount_root / "fiftyone").symlink_to(
+            outside,
+            target_is_directory=True,
+        )
+        foreign_staging = outside / "exports" / staging_name
+        foreign_staging.mkdir(parents=True)
+        real_build_at(curation_plan, descriptor)
+
+    monkeypatch.setattr(
+        final_curation,
+        "_validate_target_storage",
+        validate_storage,
+    )
+    monkeypatch.setattr(
+        final_curation,
+        "_build_export_at",
+        swap_ancestor_then_build,
+    )
+
+    with pytest.raises(CurationError, match="approved target parent changed"):
+        materialize_curated_export(plan)
+
+    assert not list(outside.glob("**/*.json"))
+    assert not (displaced / "exports/curated").exists()
+
+
+def test_target_storage_parent_relocation_during_publication_is_not_success(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = _write_source_export(tmp_path)
+    mount_root = tmp_path / "CameraTrapPython"
+    approved_root = mount_root / "fiftyone/exports"
+    approved_root.mkdir(parents=True)
+    target = approved_root / "curated"
+    plan = build_curation_plan(source, target, policy=_fixture_policy())
+    displaced = tmp_path / "displaced-exports"
+    real_validate = final_curation._validate_target_storage
+    real_rename_at = final_curation._rename_directory_noreplace_at
+
+    def validate_storage(_target: Path) -> object:
+        return real_validate(
+            target,
+            mount_root=mount_root,
+            approved_root=approved_root,
+            is_mount_fn=lambda _path: True,
+            capability_probe=lambda _path: True,
+        )
+
+    def publish_then_relocate_parent(
+        parent_fd: int,
+        source_name: str,
+        target_name: str,
+    ) -> None:
+        real_rename_at(parent_fd, source_name, target_name)
+        if source_name.startswith(".curated.building-") and target_name == target.name:
+            approved_root.rename(displaced)
+            approved_root.mkdir(parents=True)
+
+    monkeypatch.setattr(
+        final_curation,
+        "_validate_target_storage",
+        validate_storage,
+    )
+    monkeypatch.setattr(
+        final_curation,
+        "_rename_directory_noreplace_at",
+        publish_then_relocate_parent,
+    )
+
+    with pytest.raises(CurationError, match="approved target parent changed"):
+        materialize_curated_export(plan)
+
+    assert not target.exists()
+    assert (displaced / "curated/curation_report.json").is_file()
+
+
+def test_target_storage_guard_runs_before_parent_or_staging_creation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = _write_source_export(tmp_path)
+    target = tmp_path / "missing-parent/target"
+    plan = build_curation_plan(source, target, policy=_fixture_policy())
+
+    def reject_storage(_target: Path) -> None:
+        raise CurationError("injected storage rejection")
+
+    monkeypatch.setattr(
+        final_curation,
+        "_validate_target_storage",
+        reject_storage,
+    )
+
+    with pytest.raises(CurationError, match="storage rejection"):
+        materialize_curated_export(plan)
+
+    assert not target.parent.exists()
+    assert not list(tmp_path.glob("**/.target.building-*"))
+    assert not list(tmp_path.glob("**/.target.lock"))
 
 
 def test_atomic_publication_fails_closed_on_unsupported_platform(
@@ -872,16 +1263,20 @@ def test_overwrite_promotion_failure_restores_existing_target(
     sentinel = target / "existing.txt"
     sentinel.write_text("recover me", encoding="utf-8")
     plan = build_curation_plan(source, target, policy=_fixture_policy())
-    real_rename_noreplace = final_curation._rename_directory_noreplace
+    real_rename_noreplace = final_curation._rename_directory_noreplace_at
 
-    def fail_promotion(source_path: Path, target_path: Path) -> None:
-        if source_path.name.startswith(".target.building-"):
+    def fail_promotion(
+        parent_fd: int,
+        source_name: str,
+        target_name: str,
+    ) -> None:
+        if source_name.startswith(".target.building-") and target_name == target.name:
             raise OSError("injected promotion failure")
-        real_rename_noreplace(source_path, target_path)
+        real_rename_noreplace(parent_fd, source_name, target_name)
 
     monkeypatch.setattr(
         final_curation,
-        "_rename_directory_noreplace",
+        "_rename_directory_noreplace_at",
         fail_promotion,
     )
 
@@ -903,19 +1298,23 @@ def test_overwrite_promotion_collision_preserves_claimant_and_old_target(
     sentinel = target / "existing.txt"
     sentinel.write_text("recover me", encoding="utf-8")
     plan = build_curation_plan(source, target, policy=_fixture_policy())
-    real_rename_noreplace = final_curation._rename_directory_noreplace
+    real_rename_noreplace = final_curation._rename_directory_noreplace_at
     claimant_inode: int | None = None
 
-    def collide_at_promotion(source_path: Path, target_path: Path) -> None:
+    def collide_at_promotion(
+        parent_fd: int,
+        source_name: str,
+        target_name: str,
+    ) -> None:
         nonlocal claimant_inode
-        if source_path.name.startswith(".target.building-"):
+        if source_name.startswith(".target.building-") and target_name == target.name:
             target.mkdir()
             claimant_inode = target.stat().st_ino
-        real_rename_noreplace(source_path, target_path)
+        real_rename_noreplace(parent_fd, source_name, target_name)
 
     monkeypatch.setattr(
         final_curation,
-        "_rename_directory_noreplace",
+        "_rename_directory_noreplace_at",
         collide_at_promotion,
     )
 
@@ -934,6 +1333,266 @@ def test_overwrite_promotion_collision_preserves_claimant_and_old_target(
     assert not list(tmp_path.glob(".target.building-*"))
     assert not list(tmp_path.glob(".target.backup-*"))
     assert not (tmp_path / ".target.lock").exists()
+
+
+def test_owned_staging_cleanup_preserves_foreign_path_replacement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = _write_source_export(tmp_path)
+    target = tmp_path / "target"
+    plan = build_curation_plan(source, target, policy=_fixture_policy())
+    real_rename_noreplace = final_curation._rename_directory_noreplace_at
+    foreign_inode: int | None = None
+    foreign_path: Path | None = None
+
+    def publish_then_replace_staging(
+        parent_fd: int,
+        source_name: str,
+        target_name: str,
+    ) -> None:
+        nonlocal foreign_inode, foreign_path
+        real_rename_noreplace(parent_fd, source_name, target_name)
+        if target_name == target.name:
+            source_path = target.parent / source_name
+            source_path.mkdir()
+            (source_path / "foreign.txt").write_text(
+                "must survive",
+                encoding="utf-8",
+            )
+            foreign_path = source_path
+            foreign_inode = source_path.stat().st_ino
+
+    monkeypatch.setattr(
+        final_curation,
+        "_rename_directory_noreplace_at",
+        publish_then_replace_staging,
+    )
+
+    materialize_curated_export(plan)
+
+    assert foreign_path is not None
+    assert foreign_inode is not None
+    assert foreign_path.stat().st_ino == foreign_inode
+    assert (foreign_path / "foreign.txt").read_text(encoding="utf-8") == ("must survive")
+    assert (target / "curation_report.json").is_file()
+
+
+def test_publication_rejects_foreign_replacement_of_owned_staging(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = _write_source_export(tmp_path)
+    target = tmp_path / "target"
+    plan = build_curation_plan(source, target, policy=_fixture_policy())
+    real_rename_at = final_curation._rename_directory_noreplace_at
+    displaced = tmp_path / "owned-staging-displaced"
+    foreign_inode: int | None = None
+
+    def replace_staging_then_publish(
+        parent_fd: int,
+        source_name: str,
+        target_name: str,
+    ) -> None:
+        nonlocal foreign_inode
+        if source_name.startswith(".target.building-") and target_name == target.name:
+            staging_path = target.parent / source_name
+            staging_path.rename(displaced)
+            staging_path.mkdir()
+            (staging_path / "foreign.txt").write_text(
+                "must survive",
+                encoding="utf-8",
+            )
+            foreign_inode = staging_path.stat().st_ino
+        real_rename_at(parent_fd, source_name, target_name)
+
+    monkeypatch.setattr(
+        final_curation,
+        "_rename_directory_noreplace_at",
+        replace_staging_then_publish,
+    )
+
+    with pytest.raises(CurationError, match="owned staging"):
+        materialize_curated_export(plan)
+
+    assert foreign_inode is not None
+    assert target.stat().st_ino == foreign_inode
+    assert (target / "foreign.txt").read_text(encoding="utf-8") == ("must survive")
+    assert (displaced / "curation_report.json").is_file()
+
+
+def test_publication_mismatch_never_cleans_owned_export_moved_back_to_staging(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = _write_source_export(tmp_path)
+    target = tmp_path / "target"
+    plan = build_curation_plan(source, target, policy=_fixture_policy())
+    real_rename_at = final_curation._rename_directory_noreplace_at
+    returned_staging: Path | None = None
+
+    def publish_move_owned_back_and_claim_target(
+        parent_fd: int,
+        source_name: str,
+        target_name: str,
+    ) -> None:
+        nonlocal returned_staging
+        real_rename_at(parent_fd, source_name, target_name)
+        if source_name.startswith(".target.building-") and target_name == target.name:
+            returned_staging = target.parent / source_name
+            target.rename(returned_staging)
+            target.mkdir()
+            (target / "foreign.txt").write_text(
+                "must survive",
+                encoding="utf-8",
+            )
+
+    monkeypatch.setattr(
+        final_curation,
+        "_rename_directory_noreplace_at",
+        publish_move_owned_back_and_claim_target,
+    )
+
+    with pytest.raises(CurationError, match="owned staging"):
+        materialize_curated_export(plan)
+
+    assert returned_staging is not None
+    assert (returned_staging / "curation_report.json").is_file()
+    assert (target / "foreign.txt").read_text(encoding="utf-8") == ("must survive")
+
+
+def test_owned_directory_retirement_preserves_preexisting_foreign_replacement(
+    tmp_path: Path,
+) -> None:
+    staging = tmp_path / ".target.building-owned"
+    staging.mkdir()
+    (staging / "samples.json").write_text("owned", encoding="utf-8")
+    expected = final_curation._capture_directory_identity(staging)
+    assert expected is not None
+    parent_fd = os.open(tmp_path, os.O_RDONLY)
+    staging_fd = os.open(staging, os.O_RDONLY)
+    displaced = tmp_path / "owned-displaced"
+    staging.rename(displaced)
+    staging.mkdir()
+    (staging / "foreign.txt").write_text(
+        "must survive",
+        encoding="utf-8",
+    )
+    foreign_inode = staging.stat().st_ino
+    try:
+        removed = final_curation._retire_owned_directory_at(
+            parent_fd,
+            staging.name,
+            staging_fd,
+            expected,
+        )
+    finally:
+        os.close(staging_fd)
+        os.close(parent_fd)
+
+    assert removed is False
+    assert staging.stat().st_ino == foreign_inode
+    assert (staging / "foreign.txt").read_text(encoding="utf-8") == ("must survive")
+    assert displaced.is_dir()
+    assert (displaced / "samples.json").read_text(encoding="utf-8") == "owned"
+
+
+def test_owned_directory_retirement_restores_last_moment_foreign_replacement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    staging = tmp_path / ".target.building-owned"
+    staging.mkdir()
+    (staging / "samples.json").write_text("owned", encoding="utf-8")
+    expected = final_curation._capture_directory_identity(staging)
+    assert expected is not None
+    parent_fd = os.open(tmp_path, os.O_RDONLY)
+    staging_fd = os.open(staging, os.O_RDONLY)
+    displaced = tmp_path / "owned-displaced-at-retirement"
+    foreign_inode: int | None = None
+    real_rename_at = final_curation._rename_directory_noreplace_at
+
+    def swap_at_retirement(
+        directory_fd: int,
+        source_name: str,
+        target_name: str,
+    ) -> None:
+        nonlocal foreign_inode
+        if source_name == staging.name and ".retired-staging-" in target_name:
+            staging.rename(displaced)
+            staging.mkdir()
+            foreign_inode = staging.stat().st_ino
+        real_rename_at(directory_fd, source_name, target_name)
+
+    monkeypatch.setattr(
+        final_curation,
+        "_rename_directory_noreplace_at",
+        swap_at_retirement,
+    )
+    try:
+        removed = final_curation._retire_owned_directory_at(
+            parent_fd,
+            staging.name,
+            staging_fd,
+            expected,
+        )
+    finally:
+        os.close(staging_fd)
+        os.close(parent_fd)
+
+    assert removed is False
+    assert foreign_inode is not None
+    assert staging.stat().st_ino == foreign_inode
+    assert displaced.is_dir()
+    assert (displaced / "samples.json").read_text(encoding="utf-8") == "owned"
+
+
+def test_lock_retirement_restores_last_moment_foreign_replacement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = tmp_path / "target"
+    lock = tmp_path / ".target.lock"
+    displaced = tmp_path / "owned-lock-displaced"
+    parent_fd = os.open(tmp_path, os.O_RDONLY)
+    real_rename_at = final_curation._rename_directory_noreplace_at
+    foreign_inode: int | None = None
+
+    def swap_at_retirement(
+        directory_fd: int,
+        source_name: str,
+        target_name: str,
+    ) -> None:
+        nonlocal foreign_inode
+        if source_name == lock.name and ".released-lock-" in target_name:
+            lock.rename(displaced)
+            lock.write_text(
+                "foreign replacement",
+                encoding="utf-8",
+            )
+            foreign_inode = lock.stat().st_ino
+        real_rename_at(directory_fd, source_name, target_name)
+
+    monkeypatch.setattr(
+        final_curation,
+        "_rename_directory_noreplace_at",
+        swap_at_retirement,
+    )
+    try:
+        with pytest.raises(
+            CurationError,
+            match="safely release",
+        ), final_curation._exclusive_target_lock(
+            target,
+            parent_fd=parent_fd,
+        ):
+            pass
+    finally:
+        os.close(parent_fd)
+
+    assert foreign_inode is not None
+    assert lock.stat().st_ino == foreign_inode
+    assert lock.read_text(encoding="utf-8") == "foreign replacement"
 
 
 def test_materialization_rejects_a_target_that_contains_the_source(
@@ -1000,7 +1659,7 @@ def test_curation_cli_defaults_to_read_only_audit_of_approved_paths() -> None:
     args = parse_args([])
 
     assert args.source == DEFAULT_SOURCE_EXPORT_DIR
-    assert args.target == DEFAULT_TARGET_EXPORT_DIR
+    assert args.target == DEFAULT_TARGET_EXPORT_DIR == Path("/Volumes/CameraTrapPython/fiftyone/exports/" "JaguarCameraTrap_Final_Curated_v1")
     assert args.create is False
     assert args.overwrite is False
     assert args.yes is False

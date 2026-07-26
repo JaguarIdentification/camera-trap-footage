@@ -5,8 +5,10 @@ from pathlib import Path
 
 import pytest
 
+import jaguars.visualization.final_curation as final_curation
 from jaguars.visualization.final_curation import (
     DEFAULT_POLICY,
+    DEFAULT_TARGET_EXPORT_DIR,
     build_curation_plan,
 )
 from jaguars.visualization.final_dataset import EXPECTED_SAMPLE_COUNT
@@ -24,7 +26,7 @@ REAL_INTERMEDIATE_DIR = Path(
     )
 )
 REAL_SOURCE_EXPORT_DIR = REAL_INTERMEDIATE_DIR / "fo_jaguars/labeled_segmented_jaguars_primitive"
-REAL_CURATED_EXPORT_DIR = REAL_INTERMEDIATE_DIR / "fo_jaguars/labeled_segmented_jaguars_final_curated_v1"
+REAL_CURATED_EXPORT_DIR = DEFAULT_TARGET_EXPORT_DIR
 REAL_UPSTREAM_EXPORT_DIRS = (
     REAL_INTERMEDIATE_DIR / "fo_jaguars/exports/segmented_deduplicated",
     REAL_INTERMEDIATE_DIR / "fo_jaguars/exports/segmented",
@@ -67,6 +69,16 @@ def test_real_curation_dry_run_accepts_approved_1322_sample_target() -> None:
     }
     assert plan.review_paths == tuple(sorted(DEFAULT_POLICY.review_cases))
     assert plan.clipped_paths == tuple(sorted(DEFAULT_POLICY.clipped_bboxes))
+
+
+def test_real_volume_capabilities_match_reference_export_design() -> None:
+    camera_trap_python = Path("/Volumes/CameraTrapPython")
+    extreme_ssd = Path("/Volumes/Extreme SSD")
+    if not (os.path.ismount(camera_trap_python) and os.path.ismount(extreme_ssd)):
+        pytest.skip("both production volumes must be mounted")
+
+    assert final_curation.supports_atomic_directory_noreplace(camera_trap_python)
+    assert not final_curation.supports_atomic_directory_noreplace(extreme_ssd)
 
 
 @pytest.mark.skipif(

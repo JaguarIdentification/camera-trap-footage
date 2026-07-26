@@ -76,7 +76,7 @@ The Makefile includes a `data` target that runs `dvc pull` for convenience.
 
 The intended immutable v1 snapshot, `JaguarCameraTrap_Final_Curated_v1`, is
 bounded by 1,322 unique final artifacts in
-`data/intermediate/v1/fo_jaguars/labeled_segmented_jaguars_final_curated_v1`.
+`/Volumes/CameraTrapPython/fiftyone/exports/JaguarCameraTrap_Final_Curated_v1`.
 This deterministic export is derived from, but never modifies, the original
 1,367-sample `labeled_segmented_jaguars_primitive` export.
 
@@ -97,12 +97,22 @@ After review, materialize the export atomically:
 uv run python -m jaguars.visualization.final_curation --create
 ```
 
-The curated export is metadata-only: its `samples.json` points to canonical
-media paths below the untouched original export's `data` directory. No media
-is copied, linked, symlinked, or re-encoded, which keeps creation compatible
-with the exFAT data volume. The snapshot CLI is the authoritative loader for
-this reference export; a standalone FiftyOne-dataset import may expect a local
-`data` directory that is deliberately absent. Four retained records
+The curated export is metadata-only: its three JSON files are published on the
+CameraTrapPython APFS volume, while `samples.json` points to canonical media
+paths below the untouched primitive export on Extreme SSD. No media is copied,
+linked, symlinked, or re-encoded. Before staging, creation requires
+`/Volumes/CameraTrapPython` to be an actual mount, constrains the target below
+`/Volumes/CameraTrapPython/fiftyone/exports`, and verifies atomic exclusive
+directory rename support. Creation pins the mount and target parent with
+directory descriptors, rejects nested filesystems, and performs staging,
+locking, metadata writes, and publication relative to those descriptors so a
+swapped pathname cannot redirect a write. Dry-run planning remains write-free.
+Owned lock files and failed-staging/old-backup directories are retained under
+unique inert hidden tombstone names instead of deleting their contents or
+unlinking through a racy pathname. The snapshot CLI is the authoritative
+loader for this reference export; a standalone FiftyOne-dataset import may
+expect a local `data` directory that is deliberately absent. Four retained
+records
 (`000001-143`, `000002-144`, `000010-18`, and `000005-126`) are deliberately
 not re-segmented: their malformed annotations are omitted and they are marked
 `review_required=True`, `review_status="pending"`, and
@@ -138,6 +148,8 @@ filesystems. All generated FiftyOne state is constrained below
 
 - database:
   `/Volumes/CameraTrapPython/fiftyone/var/lib/mongo`
+- curated metadata export:
+  `/Volumes/CameraTrapPython/fiftyone/exports/JaguarCameraTrap_Final_Curated_v1`
 - timestamped JSON reports and `latest.json`:
   `/Volumes/CameraTrapPython/fiftyone/JaguarCameraTrap_Final_Curated_v1`
 - dataset/download defaults:

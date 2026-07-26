@@ -9,7 +9,7 @@ export at
 `data/intermediate/v1/fo_jaguars/labeled_segmented_jaguars_primitive` remains
 unchanged. A deterministic curation step materializes the independently
 loadable terminal export
-`data/intermediate/v1/fo_jaguars/labeled_segmented_jaguars_final_curated_v1`,
+`/Volumes/CameraTrapPython/fiftyone/exports/JaguarCameraTrap_Final_Curated_v1`,
 which is the only default source for the final snapshot.
 
 ## Curation policy
@@ -44,12 +44,15 @@ valid nonempty body boxes and segmentations.
 
 ## Curation storage and atomicity
 
-The curated export is metadata-only because the source volume is exFAT and
-does not support hardlinks. Each curated `samples.json` filepath is the
-canonical absolute path of retained media below the original terminal
-export's `data` directory. Creation never copies, symlinks, hardlinks, or
-re-encodes media and never modifies the original export. The target contains
-only `samples.json`, `metadata.json`, and `curation_report.json`.
+The curated export is metadata-only. Its source media remains on the Extreme
+SSD exFAT volume, while its three JSON files are published on the
+CameraTrapPython APFS state volume at
+`/Volumes/CameraTrapPython/fiftyone/exports/JaguarCameraTrap_Final_Curated_v1`.
+Each curated `samples.json` filepath is the canonical absolute path of
+retained media below the original terminal export's `data` directory.
+Creation never copies, symlinks, hardlinks, or re-encodes media and never
+modifies the original export. The target contains only `samples.json`,
+`metadata.json`, and `curation_report.json`.
 
 The terminal parser remains export-local by default. The curated snapshot
 workflow explicitly supplies the original `data` directory as its approved
@@ -66,6 +69,20 @@ is explicitly supplied and confirmed; noninteractive overwrite additionally
 requires `--yes`, and piped text is never accepted as confirmation. A lexical
 target that is itself a symlink or has an unsafe ancestor/descendant
 relationship with the source is rejected before staging or removal.
+Before creating the target parent, lock, or staging directory, creation
+requires `/Volumes/CameraTrapPython` to be an actual mount, requires the
+target to resolve as a strict descendant of
+`/Volumes/CameraTrapPython/fiftyone/exports`, and verifies that the target
+volume advertises atomic exclusive directory rename. The deepest existing
+target ancestor must remain on the CameraTrapPython filesystem; nested mounts
+are rejected. Custom targets must pass the same root, filesystem, and
+capability checks. The source exFAT volume does not advertise this capability
+and is never used for curated metadata publication.
+Creation pins the mount and target-parent identity with directory descriptors.
+Parent creation, locking, staging creation, JSON writes, and no-clobber renames
+are descriptor-relative, and the logical parent identity is rechecked around
+the staged build. An ancestor replacement therefore cannot redirect writes
+outside the approved filesystem.
 Materialization holds an exclusively created sibling lock through staging and
 publication. The CLI pins an existing target before asking for confirmation
 and passes that exact expected state into materialization. The pin records
@@ -76,7 +93,21 @@ backup, the backup identity is checked again before promotion or deletion. An
 unexpected backup is restored when the target remains absent or retained
 under an explicit recovery name when restoration would collide. A
 concurrently created or changed target is preserved, only the owned staging
-directory is removed, and lock cleanup never unlinks a foreign replacement.
+directory is retired from its operational name, and lock cleanup never
+unlinks a foreign replacement. Staging cleanup pins device/inode/type
+immediately after creation and preserves any later entry that occupies the
+former staging pathname. Because macOS has no inode-conditional unlink, owned
+staging/backup directories—including their metadata—and released lock files
+are atomically moved to unique inert hidden tombstones and retained. No
+cleanup path unlinks their contents. The move is verified against the pinned
+identity; a last-moment foreign replacement is restored or moved to a
+recovery name and is never deleted.
+After each publication rename, the promoted directory must match the pinned
+staging identity and the logical target parent must still match its pinned
+identity. Otherwise creation fails with both the unexpected entry and owned
+export preserved at their recoverable locations. Once the promotion rename
+returns successfully, cleanup never alters the pinned staging descriptor,
+even if either post-publication check fails.
 Replacement keeps the old target recoverable until the new directory is
 ready.
 
@@ -128,6 +159,8 @@ Generated state stays on
 external storage:
 
 - Database: `/Volumes/CameraTrapPython/fiftyone/var/lib/mongo`
+- Curated metadata export:
+  `/Volumes/CameraTrapPython/fiftyone/exports/JaguarCameraTrap_Final_Curated_v1`
 - Reports:
   `/Volumes/CameraTrapPython/fiftyone/JaguarCameraTrap_Final_Curated_v1`
 - Dataset/download defaults: `/Volumes/CameraTrapPython/fiftyone/datasets`
@@ -190,7 +223,8 @@ Unit tests cover representative selection and conflicts, semantic annotation
 normalization, exact counts, clips, exclusions, metadata-only sidecars,
 approved-root media references and escapes, source immutability, atomic
 failure cleanup, symlink-safe guarded overwrite, TTY confirmation, parser and
-validator compatibility, CLI defaults, and review contracts.
+validator compatibility, CLI defaults, APFS target-root/capability guards,
+owned staging cleanup, and review contracts.
 
 An isolated FiftyOne integration suite verifies schema, media-only review
 samples, all nine views, immutable construction, ownership-safe cleanup, and
@@ -206,6 +240,8 @@ The required read-only real-data curation audit verifies:
 - 59 non-null labels
 - 3 audited bbox clips
 - 4 pending-review media-only samples
+- CameraTrapPython supports atomic exclusive rename while the source Extreme
+  SSD volume does not
 
 After the curated export is materialized, its parser/validator audit must be
 green before production snapshot creation. Production verification then

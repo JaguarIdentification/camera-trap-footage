@@ -20,7 +20,7 @@ media-only review exception.
 - Source export remains unchanged:
   `data/intermediate/v1/fo_jaguars/labeled_segmented_jaguars_primitive`
 - Curated target:
-  `data/intermediate/v1/fo_jaguars/labeled_segmented_jaguars_final_curated_v1`
+  `/Volumes/CameraTrapPython/fiftyone/exports/JaguarCameraTrap_Final_Curated_v1`
 - Source records: 1,367
 - Exact-content groups/drops: 39
 - Confirmed false-positive drops: 6
@@ -65,7 +65,9 @@ removed and explicit pending-review fields/tag.
 2. Materialize only `samples.json`, `metadata.json`, and
    `curation_report.json` in a sibling staging directory.
 3. Write deterministic sample IDs and canonical original-media paths. Do not
-   copy, hardlink, symlink, or re-encode media; the source volume is exFAT.
+   copy, hardlink, symlink, or re-encode media. Source media remains on the
+   exFAT Extreme SSD, while curated metadata is published on CameraTrapPython
+   APFS.
 4. Refuse an existing target unless `--create --overwrite` is confirmed;
    require `--yes` for noninteractive replacement.
 5. Rename only after the complete staging export is written and validated,
@@ -78,6 +80,16 @@ removed and explicit pending-review fields/tag.
    existing-target pin before prompting and pass it into materialization.
    Verify the backup identity after rename and before promotion/deletion;
    restore or retain an unexpected backup under an explicit recovery name.
+8. Before any target-parent, lock, or staging write, require the actual
+   CameraTrapPython mount, a target strictly below
+   `/Volumes/CameraTrapPython/fiftyone/exports`, and advertised atomic
+   exclusive-rename support. Reject nested filesystems, pin the mount and
+   target parent with directory descriptors, and perform creation, locking,
+   staging writes, and renames relative to those descriptors. Pin staging
+   device/inode/type and never remove a foreign replacement at its former
+   pathname. Verify the promoted target against the staging identity and
+   recheck the logical parent after publication. Retire owned cleanup entries
+   to verified inert tombstones rather than using pathname-based unlink.
 
 ## Task 3: Pending-review parser and validator contract
 
@@ -126,7 +138,7 @@ removed and explicit pending-review fields/tag.
 - Modify `tests/unit/visualization/test_final_dataset.py`
 - Replace `tests/unit/visualization/test_final_real_data.py`
 
-1. Change the default terminal source to the curated export.
+1. Change the default terminal source to the APFS curated metadata export.
 2. Freeze expected counts at 1,322 / 1,108 / 214.
 3. Report actual body-annotation and review-field population.
 4. Replace the known-failure original-export test with a read-only curation
@@ -176,7 +188,9 @@ uv run python -m jaguars.visualization.final_curation --dry-run
 
 Expected: 1,322 curated records/hashes, 1,108 populated and 214 null
 identities, 59 labels, 39 duplicate drops, six false-positive drops, three
-clips, and four pending-review records.
+clips, and four pending-review records. The mounted capability check confirms
+exclusive rename on CameraTrapPython and its absence on the source Extreme
+SSD.
 
 ## Task 8: Controlled real creation (controller only)
 

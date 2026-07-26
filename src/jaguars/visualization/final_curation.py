@@ -6,10 +6,8 @@ import errno
 import hashlib
 import json
 import os
-import shutil
 import stat
 import sys
-import tempfile
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass, replace
@@ -39,7 +37,9 @@ from jaguars.visualization.final_validation import (
 )
 
 DEFAULT_SOURCE_EXPORT_DIR = Path("data/intermediate/v1/fo_jaguars/labeled_segmented_jaguars_primitive")
-DEFAULT_TARGET_EXPORT_DIR = Path("data/intermediate/v1/fo_jaguars/labeled_segmented_jaguars_final_curated_v1")
+DEFAULT_TARGET_MOUNT_ROOT = Path("/Volumes/CameraTrapPython")
+DEFAULT_CURATED_EXPORT_ROOT = DEFAULT_TARGET_MOUNT_ROOT / "fiftyone/exports"
+DEFAULT_TARGET_EXPORT_DIR = DEFAULT_CURATED_EXPORT_ROOT / "JaguarCameraTrap_Final_Curated_v1"
 DEFAULT_INTERMEDIATE_DIR = Path("data/intermediate/v1")
 DEFAULT_UPSTREAM_EXPORT_DIRS = (
     DEFAULT_INTERMEDIATE_DIR / "fo_jaguars/exports/segmented_deduplicated",
@@ -54,8 +54,13 @@ DEFAULT_MANIFEST_PATHS = (
 POLICY_VERSION = "final-curated-v1"
 NEEDS_REVIEW_TAG = "needs_annotation_review"
 _LINUX_AT_FDCWD = -100
+_ATTR_BIT_MAP_COUNT = 5
+_ATTR_VOL_CAPABILITIES = 0x00020000
+_ATTR_VOL_INFO = 0x80000000
 _RENAME_EXCL = 0x00000004
 _RENAME_NOREPLACE = 1
+_VOL_CAPABILITIES_INTERFACES = 1
+_VOL_CAP_INT_RENAME_EXCL = 0x00080000
 
 
 @dataclass(frozen=True)
@@ -69,6 +74,32 @@ class CurationPolicy:
     expected_populated_identities: int
     expected_null_identities: int
     expected_distinct_identities: int
+
+
+class _AttributeList(ctypes.Structure):
+    _fields_ = [
+        ("bitmapcount", ctypes.c_uint16),
+        ("reserved", ctypes.c_uint16),
+        ("commonattr", ctypes.c_uint32),
+        ("volattr", ctypes.c_uint32),
+        ("dirattr", ctypes.c_uint32),
+        ("fileattr", ctypes.c_uint32),
+        ("forkattr", ctypes.c_uint32),
+    ]
+
+
+class _VolumeCapabilities(ctypes.Structure):
+    _fields_ = [
+        ("capabilities", ctypes.c_uint32 * 4),
+        ("valid", ctypes.c_uint32 * 4),
+    ]
+
+
+class _VolumeCapabilitiesBuffer(ctypes.Structure):
+    _fields_ = [
+        ("length", ctypes.c_uint32),
+        ("capabilities", _VolumeCapabilities),
+    ]
 
 
 DEFAULT_POLICY = CurationPolicy(
@@ -184,6 +215,41 @@ class ExpectedTargetState:
     report_sha256: str | None = None
     report_source_export: str | None = None
     report_source_samples_sha256: str | None = None
+
+
+@dataclass(frozen=True)
+class _DirectoryIdentity:
+    device: int
+    inode: int
+
+
+@dataclass(frozen=True)
+class _EntryIdentity:
+    device: int
+    inode: int
+    file_type: int
+
+
+@dataclass(frozen=True)
+class _ValidatedTargetStorage:
+    mount_path: Path
+    target_path: Path
+    mount_identity: _DirectoryIdentity
+    is_mount_fn: Callable[[Path], bool]
+
+
+@dataclass(frozen=True)
+class _PinnedTargetParent:
+    logical_path: Path
+    descriptor: int
+    identity: _DirectoryIdentity
+
+
+@dataclass(frozen=True)
+class _OwnedDirectory:
+    name: str
+    descriptor: int
+    identity: _DirectoryIdentity
 
 
 def _without_generated_ids(value: Any) -> Any:
@@ -607,22 +673,59 @@ def _report_payload(plan: CurationPlan) -> dict[str, object]:
     }
 
 
-def _write_json(path: Path, payload: object) -> None:
-    with path.open("w", encoding="utf-8") as stream:
-        json.dump(payload, stream, indent=2, sort_keys=True)
-        stream.write("\n")
-        stream.flush()
-        os.fsync(stream.fileno())
+def _write_json_at(
+    directory_fd: int,
+    name: str,
+    payload: object,
+) -> None:
+    descriptor = os.open(
+        name,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+        0o600,
+        dir_fd=directory_fd,
+    )
+    try:
+        with os.fdopen(
+            descriptor,
+            "w",
+            encoding="utf-8",
+        ) as stream:
+            descriptor = -1
+            json.dump(
+                payload,
+                stream,
+                indent=2,
+                sort_keys=True,
+            )
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+    finally:
+        if descriptor >= 0:
+            with suppress(OSError):
+                os.close(descriptor)
 
 
-def _build_export(
+def _build_export_at(
     plan: CurationPlan,
-    staging_dir: Path,
+    directory_fd: int,
 ) -> None:
     samples_payload = {"samples": [_curated_sample_payload(sample, plan.policy_version) for sample in plan.selected]}
-    _write_json(staging_dir / "samples.json", samples_payload)
-    _write_json(staging_dir / "metadata.json", _metadata_payload(plan))
-    _write_json(staging_dir / "curation_report.json", _report_payload(plan))
+    _write_json_at(
+        directory_fd,
+        "samples.json",
+        samples_payload,
+    )
+    _write_json_at(
+        directory_fd,
+        "metadata.json",
+        _metadata_payload(plan),
+    )
+    _write_json_at(
+        directory_fd,
+        "curation_report.json",
+        _report_payload(plan),
+    )
 
 
 def _validate_staged_export(
@@ -777,6 +880,174 @@ def _same_pinned_identity(
     )
 
 
+def _capture_target_state_at(
+    parent: _PinnedTargetParent,
+    target_name: str,
+    canonical_path: Path,
+) -> ExpectedTargetState:
+    state = _capture_target_state(
+        _descriptor_path(parent.descriptor) / target_name,
+    )
+    if not state.exists:
+        return state
+    return replace(
+        state,
+        canonical_path=canonical_path,
+    )
+
+
+def _require_unchanged_target_at(
+    parent: _PinnedTargetParent,
+    target_name: str,
+    canonical_path: Path,
+    expected: ExpectedTargetState,
+) -> None:
+    try:
+        actual = _capture_target_state_at(
+            parent,
+            target_name,
+            canonical_path,
+        )
+    except CurationError as exc:
+        raise CurationError(f"target changed during materialization: {canonical_path}: {exc}") from exc
+    if actual != expected:
+        raise CurationError("target changed during materialization; concurrent target was " f"preserved: {canonical_path}")
+
+
+def _has_atomic_rename_capability(
+    capabilities: int,
+    valid: int,
+) -> bool:
+    return bool(capabilities & valid & _VOL_CAP_INT_RENAME_EXCL)
+
+
+def supports_atomic_directory_noreplace(path: Path) -> bool:
+    """Return whether the path's volume supports atomic exclusive rename."""
+    if sys.platform == "darwin":
+        try:
+            resolved = path.expanduser().resolve(strict=True)
+        except (OSError, RuntimeError, ValueError):
+            return False
+        libc = ctypes.CDLL(None, use_errno=True)
+        try:
+            getattrlist = libc.getattrlist
+        except AttributeError:
+            return False
+        getattrlist.argtypes = [
+            ctypes.c_char_p,
+            ctypes.POINTER(_AttributeList),
+            ctypes.c_void_p,
+            ctypes.c_size_t,
+            ctypes.c_ulong,
+        ]
+        getattrlist.restype = ctypes.c_int
+        attributes = _AttributeList(
+            _ATTR_BIT_MAP_COUNT,
+            0,
+            0,
+            _ATTR_VOL_INFO | _ATTR_VOL_CAPABILITIES,
+            0,
+            0,
+            0,
+        )
+        buffer = _VolumeCapabilitiesBuffer()
+        result = getattrlist(
+            os.fsencode(resolved),
+            ctypes.byref(attributes),
+            ctypes.byref(buffer),
+            ctypes.sizeof(buffer),
+            0,
+        )
+        if result != 0:
+            return False
+        capabilities = buffer.capabilities.capabilities[_VOL_CAPABILITIES_INTERFACES]
+        valid = buffer.capabilities.valid[_VOL_CAPABILITIES_INTERFACES]
+        return _has_atomic_rename_capability(capabilities, valid)
+    if sys.platform.startswith("linux"):
+        libc = ctypes.CDLL(None, use_errno=True)
+        try:
+            _ = libc.renameat2
+        except AttributeError:
+            return False
+        return True
+    return False
+
+
+def _path_device(path: Path) -> int:
+    return path.stat().st_dev
+
+
+def _deepest_existing_ancestor(
+    path: Path,
+    *,
+    boundary: Path,
+) -> Path:
+    candidate = path
+    while True:
+        try:
+            candidate.stat()
+        except FileNotFoundError:
+            if candidate == boundary:
+                raise CurationError(f"curated target mount disappeared during validation: {boundary}") from None
+            parent = candidate.parent
+            if parent == candidate or not candidate.is_relative_to(boundary):
+                raise CurationError(f"curated target escaped its mounted filesystem during validation: {path}") from None
+            candidate = parent
+            continue
+        except OSError as exc:
+            raise CurationError(f"could not inspect curated target storage at {candidate}: {exc}") from exc
+        return candidate
+
+
+def _validate_target_storage(
+    target: Path,
+    *,
+    mount_root: Path = DEFAULT_TARGET_MOUNT_ROOT,
+    approved_root: Path = DEFAULT_CURATED_EXPORT_ROOT,
+    is_mount_fn: Callable[[Path], bool] = os.path.ismount,
+    capability_probe: Callable[[Path], bool] = supports_atomic_directory_noreplace,
+    device_fn: Callable[[Path], int] = _path_device,
+) -> _ValidatedTargetStorage:
+    if not target.expanduser().is_absolute():
+        raise CurationError(f"curated target must be an absolute path: {target}")
+    if not is_mount_fn(mount_root):
+        raise CurationError(f"curated target volume must be an actual mounted filesystem: {mount_root}")
+    try:
+        resolved_mount = mount_root.expanduser().resolve(strict=True)
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise CurationError(f"could not resolve curated target mount {mount_root}: {exc}") from exc
+    resolved_approved_root = approved_root.expanduser().resolve(strict=False)
+    resolved_target = target.expanduser().resolve(strict=False)
+    if resolved_approved_root == resolved_mount or not resolved_approved_root.is_relative_to(resolved_mount):
+        raise CurationError(f"approved curated export root must be a strict descendant of {resolved_mount}: {resolved_approved_root}")
+    if resolved_target == resolved_approved_root or not resolved_target.is_relative_to(resolved_approved_root):
+        raise CurationError(f"curated target must be a strict descendant of {resolved_approved_root}: {resolved_target}")
+    mount_identity = _capture_directory_identity(resolved_mount)
+    if mount_identity is None:
+        raise CurationError(f"curated target mount is not a real directory: {resolved_mount}")
+    probe_path = _deepest_existing_ancestor(
+        resolved_target,
+        boundary=resolved_mount,
+    )
+    try:
+        mount_device = device_fn(resolved_mount)
+        target_device = device_fn(probe_path)
+    except OSError as exc:
+        raise CurationError(f"could not inspect curated target filesystem: {exc}") from exc
+    if target_device != mount_device:
+        raise CurationError("curated target must remain on the same filesystem as " f"{resolved_mount}; nested mounts are not allowed: {probe_path}")
+    if not capability_probe(probe_path):
+        raise CurationError(f"curated target volume lacks atomic no-clobber directory rename support: {probe_path}")
+    if _capture_directory_identity(resolved_mount) != mount_identity or not is_mount_fn(resolved_mount):
+        raise CurationError(f"curated target mount changed during validation: {resolved_mount}")
+    return _ValidatedTargetStorage(
+        mount_path=resolved_mount,
+        target_path=resolved_target,
+        mount_identity=mount_identity,
+        is_mount_fn=is_mount_fn,
+    )
+
+
 def _preserve_unexpected_backup(
     target: Path,
     backup: Path,
@@ -796,6 +1067,437 @@ def _preserve_unexpected_backup(
     except (CurationError, OSError) as exc:
         raise CurationError("could not restore or move the preserved target; " f"recover it manually from {backup}: {exc}") from exc
     return recovery
+
+
+def _capture_directory_identity(path: Path) -> _DirectoryIdentity | None:
+    try:
+        path_stat = path.lstat()
+    except OSError:
+        return None
+    if not stat.S_ISDIR(path_stat.st_mode) or stat.S_ISLNK(path_stat.st_mode):
+        return None
+    return _DirectoryIdentity(
+        device=path_stat.st_dev,
+        inode=path_stat.st_ino,
+    )
+
+
+def _identity_from_stat(path_stat: os.stat_result) -> _DirectoryIdentity | None:
+    if not stat.S_ISDIR(path_stat.st_mode):
+        return None
+    return _DirectoryIdentity(
+        device=path_stat.st_dev,
+        inode=path_stat.st_ino,
+    )
+
+
+def _entry_identity_from_stat(path_stat: os.stat_result) -> _EntryIdentity:
+    return _EntryIdentity(
+        device=path_stat.st_dev,
+        inode=path_stat.st_ino,
+        file_type=stat.S_IFMT(path_stat.st_mode),
+    )
+
+
+def _capture_entry_identity_at(
+    parent_fd: int,
+    name: str,
+) -> _EntryIdentity | None:
+    try:
+        path_stat = os.stat(
+            name,
+            dir_fd=parent_fd,
+            follow_symlinks=False,
+        )
+    except OSError:
+        return None
+    return _entry_identity_from_stat(path_stat)
+
+
+def _capture_directory_identity_at(
+    parent_fd: int,
+    name: str,
+) -> _DirectoryIdentity | None:
+    try:
+        path_stat = os.stat(
+            name,
+            dir_fd=parent_fd,
+            follow_symlinks=False,
+        )
+    except OSError:
+        return None
+    return _identity_from_stat(path_stat)
+
+
+def _retire_owned_directory_at(
+    parent_fd: int,
+    name: str,
+    owned_fd: int,
+    expected: _DirectoryIdentity,
+) -> bool:
+    try:
+        descriptor_identity = _identity_from_stat(os.fstat(owned_fd))
+    except OSError:
+        return False
+    if descriptor_identity != expected:
+        return False
+    if _capture_directory_identity_at(parent_fd, name) != expected:
+        return False
+    if ".building-" in name:
+        base = name.split(".building-", 1)[0]
+        retired_name = f"{base}.retired-staging-{uuid4().hex}"
+    elif ".backup-" in name:
+        base = name.split(".backup-", 1)[0]
+        retired_name = f"{base}.retired-backup-{uuid4().hex}"
+    else:
+        retired_name = f".retired-directory-{uuid4().hex}"
+    return _retire_owned_entry_at(
+        parent_fd,
+        name,
+        _EntryIdentity(
+            device=expected.device,
+            inode=expected.inode,
+            file_type=stat.S_IFDIR,
+        ),
+        retired_name,
+    )
+
+
+def _directory_open_flags() -> int:
+    return os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+
+
+def _descriptor_path(descriptor: int) -> Path:
+    if sys.platform == "darwin":
+        import fcntl
+
+        try:
+            raw_path = fcntl.fcntl(
+                descriptor,
+                50,  # F_GETPATH
+                b"\0" * 1024,
+            )
+        except OSError as exc:
+            raise CurationError(f"could not resolve pinned directory descriptor: {exc}") from exc
+        return Path(raw_path.split(b"\0", 1)[0].decode())
+    proc_path = Path("/proc/self/fd") / str(descriptor)
+    if proc_path.exists():
+        return proc_path
+    return Path("/dev/fd") / str(descriptor)
+
+
+def _open_directory_at(
+    parent_fd: int,
+    name: str,
+) -> int:
+    return os.open(
+        name,
+        _directory_open_flags(),
+        dir_fd=parent_fd,
+    )
+
+
+@contextmanager
+def _open_pinned_target_parent(
+    storage: _ValidatedTargetStorage,
+) -> Iterator[_PinnedTargetParent]:
+    root_fd: int | None = None
+    current_fd: int | None = None
+    try:
+        try:
+            root_fd = os.open(
+                storage.mount_path,
+                _directory_open_flags(),
+            )
+        except OSError as exc:
+            raise CurationError(f"could not pin curated target mount {storage.mount_path}: {exc}") from exc
+        current_fd = root_fd
+        try:
+            opened_root_identity = _identity_from_stat(os.fstat(root_fd))
+        except OSError as exc:
+            raise CurationError(f"could not inspect pinned curated target mount {storage.mount_path}: {exc}") from exc
+        path_root_identity = _capture_directory_identity(storage.mount_path)
+        if (
+            opened_root_identity != storage.mount_identity
+            or path_root_identity != storage.mount_identity
+            or not storage.is_mount_fn(storage.mount_path)
+        ):
+            raise CurationError(f"curated target mount changed after validation: {storage.mount_path}")
+
+        try:
+            relative_parent = storage.target_path.parent.relative_to(storage.mount_path)
+        except ValueError as exc:
+            raise CurationError(f"approved target parent escaped the mounted volume: {storage.target_path.parent}") from exc
+        for component in relative_parent.parts:
+            child_fd: int | None = None
+            try:
+                try:
+                    child_fd = _open_directory_at(current_fd, component)
+                except FileNotFoundError:
+                    with suppress(FileExistsError):
+                        os.mkdir(
+                            component,
+                            mode=0o755,
+                            dir_fd=current_fd,
+                        )
+                    child_fd = _open_directory_at(current_fd, component)
+            except OSError as exc:
+                raise CurationError(
+                    "approved target parent changed or contains an unsafe " f"component {component!r}: {storage.target_path.parent}: {exc}"
+                ) from exc
+            try:
+                child_identity = _identity_from_stat(os.fstat(child_fd))
+            except OSError as exc:
+                os.close(child_fd)
+                raise CurationError(f"could not inspect approved target parent {storage.target_path.parent}: {exc}") from exc
+            if child_identity is None or child_identity.device != storage.mount_identity.device:
+                os.close(child_fd)
+                raise CurationError("approved target parent must remain on the validated " f"filesystem: {storage.target_path.parent}")
+            if current_fd != root_fd:
+                os.close(current_fd)
+            current_fd = child_fd
+
+        assert current_fd is not None
+        final_identity = _identity_from_stat(os.fstat(current_fd))
+        if final_identity is None:
+            raise CurationError(f"approved target parent is not a directory: {storage.target_path.parent}")
+        yield _PinnedTargetParent(
+            logical_path=storage.target_path.parent,
+            descriptor=current_fd,
+            identity=final_identity,
+        )
+    finally:
+        if current_fd is not None and current_fd != root_fd:
+            with suppress(OSError):
+                os.close(current_fd)
+        if root_fd is not None:
+            with suppress(OSError):
+                os.close(root_fd)
+
+
+def _create_owned_staging(
+    parent: _PinnedTargetParent,
+    target_name: str,
+) -> _OwnedDirectory:
+    for _ in range(100):
+        name = f".{target_name}.building-{uuid4().hex}"
+        try:
+            os.mkdir(
+                name,
+                mode=0o700,
+                dir_fd=parent.descriptor,
+            )
+        except FileExistsError:
+            continue
+        except OSError as exc:
+            raise CurationError(f"could not create curated export staging directory: {exc}") from exc
+        expected = _capture_directory_identity_at(parent.descriptor, name)
+        if expected is None:
+            raise CurationError(f"could not pin owned staging directory: {parent.logical_path / name}")
+        descriptor: int | None = None
+        try:
+            descriptor = _open_directory_at(parent.descriptor, name)
+            opened_identity = _identity_from_stat(os.fstat(descriptor))
+        except OSError as exc:
+            if descriptor is not None:
+                with suppress(OSError):
+                    os.close(descriptor)
+            raise CurationError(f"could not pin owned staging directory: {parent.logical_path / name}: {exc}") from exc
+        if opened_identity != expected:
+            os.close(descriptor)
+            raise CurationError(f"owned staging directory changed during creation: {parent.logical_path / name}")
+        return _OwnedDirectory(
+            name=name,
+            descriptor=descriptor,
+            identity=expected,
+        )
+    raise CurationError(f"could not allocate unique staging directory below {parent.logical_path}")
+
+
+def _require_pinned_parent_path(
+    parent: _PinnedTargetParent,
+) -> None:
+    if _capture_directory_identity(parent.logical_path) != parent.identity:
+        raise CurationError(f"approved target parent changed during materialization: {parent.logical_path}")
+
+
+def _require_published_staging_identity(
+    parent: _PinnedTargetParent,
+    target_name: str,
+    staging: _OwnedDirectory,
+) -> None:
+    published_identity = _capture_directory_identity_at(
+        parent.descriptor,
+        target_name,
+    )
+    if published_identity == staging.identity:
+        return
+    try:
+        owned_location = _descriptor_path(staging.descriptor)
+    except CurationError:
+        owned_location = Path(f"<open directory descriptor {staging.descriptor}>")
+    raise CurationError(
+        "published directory did not match the owned staging identity; "
+        f"the unexpected target was preserved at {parent.logical_path / target_name} "
+        f"and the owned staging directory remains at {owned_location}"
+    )
+
+
+def _rename_directory_noreplace_at(
+    parent_fd: int,
+    source_name: str,
+    target_name: str,
+) -> None:
+    if sys.platform == "darwin":
+        libc = ctypes.CDLL(None, use_errno=True)
+        try:
+            renameatx_np = libc.renameatx_np
+        except AttributeError as exc:
+            raise CurationError("atomic descriptor-relative directory publication is unavailable on macOS") from exc
+        renameatx_np.argtypes = [
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_uint,
+        ]
+        renameatx_np.restype = ctypes.c_int
+        result = renameatx_np(
+            parent_fd,
+            os.fsencode(source_name),
+            parent_fd,
+            os.fsencode(target_name),
+            _RENAME_EXCL,
+        )
+    elif sys.platform.startswith("linux"):
+        libc = ctypes.CDLL(None, use_errno=True)
+        try:
+            renameat2 = libc.renameat2
+        except AttributeError as exc:
+            raise CurationError("atomic descriptor-relative directory publication is unavailable on Linux") from exc
+        renameat2.argtypes = [
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_uint,
+        ]
+        renameat2.restype = ctypes.c_int
+        result = renameat2(
+            parent_fd,
+            os.fsencode(source_name),
+            parent_fd,
+            os.fsencode(target_name),
+            _RENAME_NOREPLACE,
+        )
+    else:
+        raise CurationError(f"descriptor-relative publication is unsupported on platform {sys.platform!r}")
+    if result != 0:
+        error_number = ctypes.get_errno()
+        raise OSError(
+            error_number,
+            os.strerror(error_number),
+            target_name,
+        )
+
+
+def _entry_exists_at(
+    parent_fd: int,
+    name: str,
+) -> bool:
+    try:
+        os.stat(
+            name,
+            dir_fd=parent_fd,
+            follow_symlinks=False,
+        )
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True
+    return True
+
+
+def _restore_unexpected_retired_entry_at(
+    parent_fd: int,
+    original_name: str,
+    retired_name: str,
+) -> None:
+    if not _entry_exists_at(parent_fd, original_name):
+        try:
+            _rename_directory_noreplace_at(
+                parent_fd,
+                retired_name,
+                original_name,
+            )
+        except (CurationError, OSError):
+            pass
+        else:
+            return
+    recovery_name = f".{Path(original_name).name}.recovery-{uuid4().hex}"
+    with suppress(CurationError, OSError):
+        _rename_directory_noreplace_at(
+            parent_fd,
+            retired_name,
+            recovery_name,
+        )
+
+
+def _retire_owned_entry_at(
+    parent_fd: int,
+    name: str,
+    expected: _EntryIdentity,
+    retired_name: str,
+) -> bool:
+    if _capture_entry_identity_at(parent_fd, name) != expected:
+        return False
+    try:
+        _rename_directory_noreplace_at(
+            parent_fd,
+            name,
+            retired_name,
+        )
+    except (CurationError, OSError):
+        return False
+    if _capture_entry_identity_at(parent_fd, retired_name) == expected:
+        return True
+    _restore_unexpected_retired_entry_at(
+        parent_fd,
+        name,
+        retired_name,
+    )
+    return False
+
+
+def _preserve_unexpected_backup_at(
+    parent: _PinnedTargetParent,
+    target_name: str,
+    backup_name: str,
+) -> Path:
+    if not _entry_exists_at(parent.descriptor, target_name):
+        try:
+            _rename_directory_noreplace_at(
+                parent.descriptor,
+                backup_name,
+                target_name,
+            )
+        except (CurationError, OSError):
+            pass
+        else:
+            return parent.logical_path / target_name
+
+    recovery_name = f".{target_name}.recovery-{uuid4().hex}"
+    try:
+        _rename_directory_noreplace_at(
+            parent.descriptor,
+            backup_name,
+            recovery_name,
+        )
+    except (CurationError, OSError) as exc:
+        raise CurationError(
+            "could not restore or move the preserved target; recover it " f"manually from {parent.logical_path / backup_name}: {exc}"
+        ) from exc
+    return parent.logical_path / recovery_name
 
 
 def _rename_directory_noreplace(source: Path, target: Path) -> None:
@@ -847,16 +1549,32 @@ def _rename_directory_noreplace(source: Path, target: Path) -> None:
 
 
 @contextmanager
-def _exclusive_target_lock(target: Path) -> Iterator[None]:
+def _exclusive_target_lock(
+    target: Path,
+    *,
+    parent_fd: int | None = None,
+) -> Iterator[None]:
     lock_path = target.parent / f".{target.name}.lock"
+    lock_name = lock_path.name
     descriptor: int | None = None
-    owned_identity: tuple[int, int] | None = None
+    opened_parent_fd: int | None = None
+    owned_identity: _EntryIdentity | None = None
     try:
+        if parent_fd is None:
+            try:
+                opened_parent_fd = os.open(
+                    target.parent,
+                    _directory_open_flags(),
+                )
+            except OSError as exc:
+                raise CurationError(f"could not pin curated export lock parent {target.parent}: {exc}") from exc
+            parent_fd = opened_parent_fd
         try:
             descriptor = os.open(
-                lock_path,
+                lock_name,
                 os.O_CREAT | os.O_EXCL | os.O_WRONLY,
                 0o600,
+                dir_fd=parent_fd,
             )
         except FileExistsError as exc:
             raise CurationError(f"curated export lock already exists: {lock_path}") from exc
@@ -864,7 +1582,7 @@ def _exclusive_target_lock(target: Path) -> Iterator[None]:
             raise CurationError(f"could not acquire curated export lock {lock_path}: {exc}") from exc
         try:
             lock_stat = os.fstat(descriptor)
-            owned_identity = (lock_stat.st_dev, lock_stat.st_ino)
+            owned_identity = _entry_identity_from_stat(lock_stat)
             token = f"{os.getpid()}:{uuid4().hex}\n".encode()
             os.write(descriptor, token)
             os.fsync(descriptor)
@@ -873,29 +1591,23 @@ def _exclusive_target_lock(target: Path) -> Iterator[None]:
         yield
     finally:
         active_exception = sys.exc_info()[0] is not None
-        cleanup_error: OSError | None = None
-        if descriptor is not None and owned_identity is not None:
-            try:
-                current_stat = lock_path.lstat()
-            except FileNotFoundError:
-                pass
-            except OSError as exc:
-                cleanup_error = exc
-            else:
-                current_identity = (
-                    current_stat.st_dev,
-                    current_stat.st_ino,
-                )
-                if stat.S_ISREG(current_stat.st_mode) and current_identity == owned_identity:
-                    try:
-                        lock_path.unlink()
-                    except OSError as exc:
-                        cleanup_error = exc
+        cleanup_failed = False
+        if parent_fd is not None and descriptor is not None and owned_identity is not None:
+            retired_name = f".{target.name}.released-lock-{uuid4().hex}"
+            cleanup_failed = not _retire_owned_entry_at(
+                parent_fd,
+                lock_name,
+                owned_identity,
+                retired_name,
+            )
         if descriptor is not None:
             with suppress(OSError):
                 os.close(descriptor)
-        if cleanup_error is not None and not active_exception:
-            raise CurationError(f"could not release curated export lock {lock_path}: " f"{cleanup_error}") from cleanup_error
+        if opened_parent_fd is not None:
+            with suppress(OSError):
+                os.close(opened_parent_fd)
+        if cleanup_failed and not active_exception:
+            raise CurationError("could not safely release curated export lock without " f"touching a foreign replacement: {lock_path}")
 
 
 def materialize_curated_export(
@@ -921,111 +1633,237 @@ def materialize_curated_export(
     if plan.source_dir.is_relative_to(current_resolved_target):
         raise CurationError("target export must not contain the source export")
 
-    if expected_target_state is None:
-        initial_target_state = _capture_target_state(target)
-    else:
-        _require_unchanged_target(target, expected_target_state)
-        initial_target_state = expected_target_state
-    if initial_target_state.exists and initial_target_state.canonical_path != plan.resolved_target_dir:
-        raise CurationError("target export resolution changed after planning: " f"{target} -> {initial_target_state.canonical_path}")
-
-    target.parent.mkdir(parents=True, exist_ok=True)
-    with _exclusive_target_lock(target):
-        _require_unchanged_target(target, initial_target_state)
-        preflight = initial_target_state
-        if preflight.exists:
-            if not overwrite:
-                raise CurationError(f"target export already exists: {target}")
-            if not confirmed:
-                raise CurationError("overwrite requires explicit confirmation")
-        elif target.resolve(strict=False) != plan.resolved_target_dir:
-            raise CurationError("target export resolution changed after planning: " f"{target} -> {target.resolve(strict=False)}")
-
-        staging = Path(
-            tempfile.mkdtemp(
-                dir=target.parent,
-                prefix=f".{target.name}.building-",
+    storage = _validate_target_storage(target)
+    if storage.target_path != plan.resolved_target_dir:
+        raise CurationError("target export resolution changed during storage validation: " f"{target} -> {storage.target_path}")
+    with _open_pinned_target_parent(storage) as parent:
+        if expected_target_state is None:
+            initial_target_state = _capture_target_state_at(
+                parent,
+                target.name,
+                plan.resolved_target_dir,
             )
-        )
-        try:
-            _build_export(plan, staging)
-            _validate_staged_export(plan, staging)
-            if not preflight.exists:
-                _require_unchanged_target(target, preflight)
-                try:
-                    _rename_directory_noreplace(staging, target)
-                except OSError as exc:
-                    if exc.errno in (errno.EEXIST, errno.ENOTEMPTY):
-                        raise CurationError(
-                            "could not publish curated export because a " f"concurrent target appeared and was preserved: {target}"
-                        ) from exc
-                    raise CurationError(f"could not publish curated export to {target}: {exc}") from exc
-                return target
+        else:
+            _require_unchanged_target_at(
+                parent,
+                target.name,
+                plan.resolved_target_dir,
+                expected_target_state,
+            )
+            initial_target_state = expected_target_state
+        if initial_target_state.exists and initial_target_state.canonical_path != plan.resolved_target_dir:
+            raise CurationError("target export resolution changed after planning: " f"{target} -> {initial_target_state.canonical_path}")
 
-            backup = target.parent / f".{target.name}.backup-{uuid4().hex}"
-            _require_unchanged_target(target, preflight)
+        with _exclusive_target_lock(
+            target,
+            parent_fd=parent.descriptor,
+        ):
+            _require_unchanged_target_at(
+                parent,
+                target.name,
+                plan.resolved_target_dir,
+                initial_target_state,
+            )
+            preflight = initial_target_state
+            if preflight.exists:
+                if not overwrite:
+                    raise CurationError(f"target export already exists: {target}")
+                if not confirmed:
+                    raise CurationError("overwrite requires explicit confirmation")
+
+            staging = _create_owned_staging(
+                parent,
+                target.name,
+            )
+            staging_rename_returned = False
             try:
-                os.replace(target, backup)
-            except OSError as exc:
-                raise CurationError(f"could not preserve existing target before publication: " f"{target}: {exc}") from exc
-            try:
-                backup_state = _capture_target_state(backup)
-            except CurationError as exc:
-                preserved_at = _preserve_unexpected_backup(target, backup)
-                raise CurationError(
-                    "backup identity could not be verified against the "
-                    "confirmed target; publication aborted and the unexpected "
-                    f"entry was preserved at {preserved_at}"
-                ) from exc
-            if not _same_pinned_identity(preflight, backup_state):
-                preserved_at = _preserve_unexpected_backup(target, backup)
-                raise CurationError(
-                    "backup identity did not match the confirmed target; "
-                    "publication aborted and the unexpected directory was "
-                    f"preserved at {preserved_at}"
+                _require_pinned_parent_path(parent)
+                _build_export_at(
+                    plan,
+                    staging.descriptor,
                 )
-            try:
-                post_backup_target = _capture_target_state(target)
-            except CurationError as exc:
-                preserved_at = _preserve_unexpected_backup(target, backup)
-                raise CurationError(
-                    "target changed after the confirmed target was backed up; "
-                    "publication aborted and the confirmed backup was "
-                    f"preserved at {preserved_at}"
-                ) from exc
-            if post_backup_target.exists:
-                preserved_at = _preserve_unexpected_backup(target, backup)
-                raise CurationError(
-                    "target changed after the confirmed target was backed up; "
-                    "publication aborted and the confirmed backup was "
-                    f"preserved at {preserved_at}"
+                _validate_staged_export(
+                    plan,
+                    _descriptor_path(staging.descriptor),
                 )
-            try:
-                _rename_directory_noreplace(staging, target)
-            except BaseException as exc:
-                preserved_at = _preserve_unexpected_backup(target, backup)
-                if isinstance(exc, (KeyboardInterrupt, SystemExit)):
-                    raise
-                if preserved_at == target:
-                    raise CurationError("could not publish curated export; previous target was restored") from exc
-                raise CurationError(
-                    "could not publish curated export because a concurrent "
-                    "target appeared; the concurrent target was preserved "
-                    "and the previous target is recoverable at "
-                    f"{preserved_at}"
-                ) from exc
-            backup_before_delete = _capture_target_state(backup)
-            if not _same_pinned_identity(preflight, backup_before_delete):
-                raise CurationError("curated export was published but backup identity changed; " f"the unexpected backup was retained at {backup}")
-            try:
-                shutil.rmtree(backup)
-            except OSError as exc:
-                raise CurationError("curated export was published but old backup remains at " f"{backup}: {exc}") from exc
-            return target
-        finally:
-            if staging.exists():
+                _require_pinned_parent_path(parent)
                 with suppress(OSError):
-                    shutil.rmtree(staging)
+                    os.fsync(staging.descriptor)
+                if not preflight.exists:
+                    _require_unchanged_target_at(
+                        parent,
+                        target.name,
+                        plan.resolved_target_dir,
+                        preflight,
+                    )
+                    try:
+                        _rename_directory_noreplace_at(
+                            parent.descriptor,
+                            staging.name,
+                            target.name,
+                        )
+                        staging_rename_returned = True
+                    except OSError as exc:
+                        if exc.errno in (errno.EEXIST, errno.ENOTEMPTY):
+                            raise CurationError(
+                                "could not publish curated export because a " f"concurrent target appeared and was preserved: {target}"
+                            ) from exc
+                        raise CurationError(f"could not publish curated export to {target}: {exc}") from exc
+                    _require_published_staging_identity(
+                        parent,
+                        target.name,
+                        staging,
+                    )
+                    _require_pinned_parent_path(parent)
+                    return target
+
+                backup_name = f".{target.name}.backup-{uuid4().hex}"
+                backup = parent.logical_path / backup_name
+                _require_unchanged_target_at(
+                    parent,
+                    target.name,
+                    plan.resolved_target_dir,
+                    preflight,
+                )
+                try:
+                    _rename_directory_noreplace_at(
+                        parent.descriptor,
+                        target.name,
+                        backup_name,
+                    )
+                except (CurationError, OSError) as exc:
+                    raise CurationError("could not preserve existing target before " f"publication: {target}: {exc}") from exc
+                try:
+                    backup_state = _capture_target_state_at(
+                        parent,
+                        backup_name,
+                        plan.resolved_target_dir,
+                    )
+                except CurationError as exc:
+                    preserved_at = _preserve_unexpected_backup_at(
+                        parent,
+                        target.name,
+                        backup_name,
+                    )
+                    raise CurationError(
+                        "backup identity could not be verified against the "
+                        "confirmed target; publication aborted and the "
+                        f"unexpected entry was preserved at {preserved_at}"
+                    ) from exc
+                if not _same_pinned_identity(preflight, backup_state):
+                    preserved_at = _preserve_unexpected_backup_at(
+                        parent,
+                        target.name,
+                        backup_name,
+                    )
+                    raise CurationError(
+                        "backup identity did not match the confirmed target; "
+                        "publication aborted and the unexpected directory was "
+                        f"preserved at {preserved_at}"
+                    )
+                try:
+                    post_backup_target = _capture_target_state_at(
+                        parent,
+                        target.name,
+                        plan.resolved_target_dir,
+                    )
+                except CurationError as exc:
+                    preserved_at = _preserve_unexpected_backup_at(
+                        parent,
+                        target.name,
+                        backup_name,
+                    )
+                    raise CurationError(
+                        "target changed after the confirmed target was backed "
+                        "up; publication aborted and the confirmed backup was "
+                        f"preserved at {preserved_at}"
+                    ) from exc
+                if post_backup_target.exists:
+                    preserved_at = _preserve_unexpected_backup_at(
+                        parent,
+                        target.name,
+                        backup_name,
+                    )
+                    raise CurationError(
+                        "target changed after the confirmed target was backed "
+                        "up; publication aborted and the confirmed backup was "
+                        f"preserved at {preserved_at}"
+                    )
+                try:
+                    _rename_directory_noreplace_at(
+                        parent.descriptor,
+                        staging.name,
+                        target.name,
+                    )
+                    staging_rename_returned = True
+                except BaseException as exc:
+                    preserved_at = _preserve_unexpected_backup_at(
+                        parent,
+                        target.name,
+                        backup_name,
+                    )
+                    if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+                        raise
+                    if preserved_at == target:
+                        raise CurationError("could not publish curated export; previous target was restored") from exc
+                    raise CurationError(
+                        "could not publish curated export because a "
+                        "concurrent target appeared; the concurrent target "
+                        "was preserved and the previous target is recoverable "
+                        f"at {preserved_at}"
+                    ) from exc
+                _require_published_staging_identity(
+                    parent,
+                    target.name,
+                    staging,
+                )
+                _require_pinned_parent_path(parent)
+                backup_before_delete = _capture_target_state_at(
+                    parent,
+                    backup_name,
+                    plan.resolved_target_dir,
+                )
+                if not _same_pinned_identity(preflight, backup_before_delete):
+                    raise CurationError(
+                        "curated export was published but backup identity " "changed; the unexpected backup was retained at " f"{backup}"
+                    )
+                backup_fd: int | None = None
+                try:
+                    backup_fd = _open_directory_at(
+                        parent.descriptor,
+                        backup_name,
+                    )
+                    backup_identity = _identity_from_stat(os.fstat(backup_fd))
+                    if preflight.device is None or preflight.inode is None:
+                        raise CurationError("curated export was published but the confirmed " "target identity was incomplete")
+                    expected_backup_identity = _DirectoryIdentity(
+                        device=preflight.device,
+                        inode=preflight.inode,
+                    )
+                    if backup_identity != expected_backup_identity or not _retire_owned_directory_at(
+                        parent.descriptor,
+                        backup_name,
+                        backup_fd,
+                        expected_backup_identity,
+                    ):
+                        raise CurationError("curated export was published but the old backup " f"could not be safely removed: {backup}")
+                except OSError as exc:
+                    raise CurationError("curated export was published but old backup remains " f"at {backup}: {exc}") from exc
+                finally:
+                    if backup_fd is not None:
+                        with suppress(OSError):
+                            os.close(backup_fd)
+                return target
+            finally:
+                if not staging_rename_returned:
+                    _retire_owned_directory_at(
+                        parent.descriptor,
+                        staging.name,
+                        staging.descriptor,
+                        staging.identity,
+                    )
+                with suppress(OSError):
+                    os.close(staging.descriptor)
 
 
 class _ArgumentParser(argparse.ArgumentParser):
