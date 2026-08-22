@@ -80,6 +80,28 @@ bounded by 1,322 unique final artifacts in
 This deterministic export is derived from, but never modifies, the original
 1,367-sample `labeled_segmented_jaguars_primitive` export.
 
+#### Launch the existing snapshot
+
+The project `.venv` is a symlink to `/Volumes/CameraTrapPython/venv`. After a
+reboot or reconnecting the external disk, mount the CameraTrapPython APFS
+sparsebundle before activating the environment:
+
+```bash
+hdiutil attach "/Volumes/Extreme SSD/CuratedCameraTrapData/camera-trap-footage-python.sparsebundle"
+```
+
+From the `camera-trap-footage` project directory, activate the environment and
+launch the persistent curated dataset:
+
+```bash
+source .venv/bin/activate
+uv run python -m jaguars.visualization.final_dataset --launch-only
+```
+
+If `source .venv/bin/activate` reports `no such file or directory`, verify that
+`/Volumes/CameraTrapPython` is mounted; the error means that the `.venv`
+symlink target is unavailable.
+
 Audit the approved curation policy without writing:
 
 ```bash
